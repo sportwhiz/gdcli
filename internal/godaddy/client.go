@@ -39,6 +39,24 @@ type HTTPClient struct {
 	httpClient *http.Client
 }
 
+const (
+	smallResponseLimitBytes = int64(2 << 20)
+	bulkResponseLimitBytes  = int64(50 << 20)
+	errorResponseLimitBytes = int64(1 << 20)
+)
+
+type V2DomainAction struct {
+	ActionID   string `json:"actionId,omitempty"`
+	Type       string `json:"type,omitempty"`
+	Status     string `json:"status,omitempty"`
+	CreatedAt  string `json:"createdAt,omitempty"`
+	ModifiedAt string `json:"modifiedAt,omitempty"`
+}
+
+type V2NotificationsOptIn struct {
+	NotificationTypes []string `json:"notificationTypes,omitempty"`
+}
+
 type Suggestion struct {
 	Domain string  `json:"domain"`
 	Score  float64 `json:"score"`
@@ -488,6 +506,97 @@ func (c *HTTPClient) SetRecords(ctx context.Context, domain string, records []DN
 	return c.do(ctx, http.MethodPut, "/v1/domains/"+url.PathEscape(domain)+"/records", records, nil, "")
 }
 
+func (c *HTTPClient) ResolveCustomerID(ctx context.Context, shopperID string) (string, error) {
+	if strings.TrimSpace(shopperID) == "" {
+		return "", &apperr.AppError{Code: apperr.CodeValidation, Message: "shopper_id is required"}
+	}
+	var out struct {
+		CustomerID string `json:"customerId"`
+	}
+	q := url.Values{}
+	q.Set("includes", "customerId")
+	if err := c.do(ctx, http.MethodGet, "/v1/shoppers/"+url.PathEscape(shopperID)+"?"+q.Encode(), nil, &out, ""); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out.CustomerID) == "" {
+		return "", &apperr.AppError{Code: apperr.CodeProvider, Message: "customerId not present in shopper response"}
+	}
+	return out.CustomerID, nil
+}
+
+func (c *HTTPClient) V2Get(ctx context.Context, path string, query url.Values, out any) error {
+	p := path
+	if query != nil && len(query) > 0 {
+		sep := "?"
+		if strings.Contains(p, "?") {
+			sep = "&"
+		}
+		p = p + sep + query.Encode()
+	}
+	return c.do(ctx, http.MethodGet, p, nil, out, "")
+}
+
+func (c *HTTPClient) V2Post(ctx context.Context, path string, body any, out any, idempotencyKey string) error {
+	return c.do(ctx, http.MethodPost, path, body, out, idempotencyKey)
+}
+
+func (c *HTTPClient) V2Put(ctx context.Context, path string, body any, out any) error {
+	return c.do(ctx, http.MethodPut, path, body, out, "")
+}
+
+func (c *HTTPClient) V2Patch(ctx context.Context, path string, body any, out any) error {
+	return c.do(ctx, http.MethodPatch, path, body, out, "")
+}
+
+func (c *HTTPClient) DomainDetailV2(ctx context.Context, customerID, domain string, includes []string) (map[string]any, error) {
+	q := url.Values{}
+	for _, include := range includes {
+		if strings.TrimSpace(include) != "" {
+			q.Add("includes", include)
+		}
+	}
+	path := "/v2/customers/" + url.PathEscape(customerID) + "/domains/" + url.PathEscape(domain)
+	var out map[string]any
+	if err := c.V2Get(ctx, path, q, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *HTTPClient) DomainDetailV1(ctx context.Context, domain string) (map[string]any, error) {
+	var out map[string]any
+	if err := c.do(ctx, http.MethodGet, "/v1/domains/"+url.PathEscape(domain), nil, &out, ""); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *HTTPClient) RenewV2(ctx context.Context, customerID, domain string, years int, idempotencyKey string) (RenewResult, error) {
+	path := "/v2/customers/" + url.PathEscape(customerID) + "/domains/" + url.PathEscape(domain) + "/renew"
+	body := map[string]any{"period": years}
+	var out struct {
+		Price    interface{} `json:"price"`
+		Currency string      `json:"currency"`
+		OrderID  string      `json:"orderId"`
+	}
+	if err := c.V2Post(ctx, path, body, &out, idempotencyKey); err != nil {
+		return RenewResult{}, err
+	}
+	price, _, _ := normalizeProviderPrice(out.Price)
+	return RenewResult{
+		Domain:   domain,
+		Price:    price,
+		Currency: out.Currency,
+		OrderID:  out.OrderID,
+	}, nil
+}
+
+func (c *HTTPClient) SetNameserversV2(ctx context.Context, customerID, domain string, nameservers []string) error {
+	path := "/v2/customers/" + url.PathEscape(customerID) + "/domains/" + url.PathEscape(domain) + "/nameServers"
+	body := map[string]any{"nameServers": nameservers}
+	return c.V2Put(ctx, path, body, nil)
+}
+
 func (c *HTTPClient) do(ctx context.Context, method, path string, body any, out any, idempotencyKey string) error {
 	var r io.Reader
 	if body != nil {
@@ -521,14 +630,15 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, body any, out 
 		if out == nil {
 			return nil
 		}
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil && err != io.EOF {
+		limited := io.LimitReader(resp.Body, responseLimitFor(method, path))
+		if err := json.NewDecoder(limited).Decode(out); err != nil && err != io.EOF {
 			return &apperr.AppError{Code: apperr.CodeProvider, Message: "failed decoding provider response", Cause: err}
 		}
 		return nil
 	}
 
 	var raw map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&raw)
+	_ = json.NewDecoder(io.LimitReader(resp.Body, errorResponseLimitBytes)).Decode(&raw)
 	if resp.StatusCode == 429 {
 		return &apperr.AppError{Code: apperr.CodeRateLimited, Message: "provider rate limited", Retryable: true, Details: raw}
 	}
@@ -536,4 +646,23 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, body any, out 
 		return &apperr.AppError{Code: apperr.CodeAuth, Message: "provider authentication failed", Details: raw}
 	}
 	return &apperr.AppError{Code: apperr.CodeProvider, Message: "provider returned non-success status", Details: map[string]any{"status": resp.StatusCode, "provider": raw}}
+}
+
+func responseLimitFor(method, path string) int64 {
+	cleanPath := path
+	if idx := strings.Index(cleanPath, "?"); idx >= 0 {
+		cleanPath = cleanPath[:idx]
+	}
+	switch {
+	case method == http.MethodPost && cleanPath == "/v1/domains/available":
+		return bulkResponseLimitBytes
+	case method == http.MethodGet && cleanPath == "/v1/orders":
+		return bulkResponseLimitBytes
+	case method == http.MethodGet && cleanPath == "/v1/subscriptions":
+		return bulkResponseLimitBytes
+	case method == http.MethodGet && cleanPath == "/v1/domains":
+		return bulkResponseLimitBytes
+	default:
+		return smallResponseLimitBytes
+	}
 }

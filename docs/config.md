@@ -7,6 +7,10 @@
 ## Keys
 
 - `api_environment`: `prod` or `ote`
+- `shopper_id`: string (optional)
+- `customer_id`: string (optional)
+- `customer_id_resolved_at`: RFC3339 string (optional)
+- `customer_id_source`: `manual` or `shopper_lookup`
 - `auto_purchase_enabled`: bool
 - `acknowledgment_hash`: string
 - `max_price_per_domain`: number (USD)

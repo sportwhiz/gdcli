@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"flag"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,7 +92,12 @@ type state struct {
 	orderCounter int
 }
 
+const maxRequestBodyBytes = int64(1 << 20)
+
 func main() {
+	listen := flag.String("listen", defaultListenAddr(), "listen address for mock server")
+	flag.Parse()
+
 	s := &state{
 		portfolio: []portfolioDomain{
 			{Domain: "alpha.com", Expires: "2026-12-31"},
@@ -148,7 +156,7 @@ func main() {
 	mux.HandleFunc("/v1/orders", s.handleOrders)
 	mux.HandleFunc("/v1/subscriptions", s.handleSubscriptions)
 
-	addr := ":8787"
+	addr := *listen
 	log.Printf("mock godaddy listening on %s", addr)
 	srv := &http.Server{
 		Addr:              addr,
@@ -158,6 +166,28 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func defaultListenAddr() string {
+	if v := strings.TrimSpace(os.Getenv("MOCK_GODADDY_LISTEN")); v != "" {
+		return v
+	}
+	return "127.0.0.1:8787"
+}
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	return dec.Decode(v)
+}
+
+func writeDecodeErr(w http.ResponseWriter, err error) {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"message": "request body too large"})
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]any{"message": "invalid json"})
 }
 
 func (s *state) handleOrders(w http.ResponseWriter, r *http.Request) {
@@ -273,8 +303,8 @@ func (s *state) handleAvailable(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Domains []string `json:"domains"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"message": "invalid json"})
+		if err := decodeJSONBody(w, r, &req); err != nil {
+			writeDecodeErr(w, err)
 			return
 		}
 		out := make([]availability, 0, len(req.Domains))
@@ -301,8 +331,8 @@ func (s *state) handlePurchase(w http.ResponseWriter, r *http.Request) {
 		Domain string `json:"domain"`
 		Period int    `json:"period"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "invalid json"})
+	if err := decodeJSONBody(w, r, &req); err != nil {
+		writeDecodeErr(w, err)
 		return
 	}
 	if req.Period <= 0 {
@@ -357,8 +387,8 @@ func (s *state) handleDomainSub(w http.ResponseWriter, r *http.Request) {
 			var req struct {
 				NameServers []string `json:"nameServers"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"message": "invalid json"})
+			if err := decodeJSONBody(w, r, &req); err != nil {
+				writeDecodeErr(w, err)
 				return
 			}
 			s.nameservers[domain] = req.NameServers
@@ -385,8 +415,8 @@ func (s *state) handleDomainSub(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, s.records[domain])
 		case http.MethodPut:
 			var req []dnsRecord
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"message": "invalid json"})
+			if err := decodeJSONBody(w, r, &req); err != nil {
+				writeDecodeErr(w, err)
 				return
 			}
 			s.records[domain] = req

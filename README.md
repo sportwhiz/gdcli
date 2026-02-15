@@ -185,11 +185,30 @@ gdcli dns apply --template afternic-nameservers --domains /tmp/portfolio.txt --d
 - `domains renew <domain> --years N [--dry-run] [--auto-approve]`
 - `domains renew-bulk <file> --years N [--dry-run] [--auto-approve]`
 - `domains list [--expiring-in N] [--tld TLD] [--contains TEXT]`
+- `domains portfolio [--expiring-in N] [--tld TLD] [--contains TEXT] [--concurrency N]` (agent-friendly full list with nameservers)
+- `domains detail <domain> [--includes actions,contacts,dnssecRecords,registryStatusCodes]`
+- `domains actions <domain> [--type ACTION_TYPE]`
+- `domains change-of-registrant <domain>`
+- `domains usage <yyyymm>`
+- `domains maintenances [--id MAINTENANCE_ID]`
+- `domains notifications next|optin list|optin set|schema|ack`
+- `domains contacts set <domain> --body-json '<json>' [--apply]`
+- `domains nameservers set <domain> --nameservers ns1,ns2 [--apply]`
+- `domains dnssec add <domain> --body-json '<json>' [--apply]`
+- `domains forwarding get|create|update <fqdn> [--body-json '<json>'] [--apply]`
+- `domains privacy-forwarding get|set <domain> [--body-json '<json>'] [--apply]`
+- `domains auth-code regenerate <domain> [--apply]`
+- `domains register schema|validate|purchase ...`
+- `domains transfer status|validate|start|in-accept|in-cancel|in-restart|in-retry|out|out-accept|out-reject ...`
+- `domains redeem <domain> [--body-json '<json>'] [--apply]`
 
 ### `account`
 
 - `account orders list [--limit N] [--offset N]`
 - `account subscriptions list [--limit N] [--offset N]`
+- `account identity show`
+- `account identity set --shopper-id ID [--customer-id ID]`
+- `account identity resolve`
 
 ### `dns`
 
@@ -210,6 +229,10 @@ Config file: `~/.gdcli/config.json`
 | Key | Default | Purpose |
 |---|---:|---|
 | `api_environment` | `prod` | GoDaddy environment (`prod` or `ote`) |
+| `shopper_id` | empty | Shopper id used to resolve/store customer id |
+| `customer_id` | empty | Customer id used for v2 customer-scoped API calls |
+| `customer_id_resolved_at` | empty | RFC3339 timestamp of last successful shopper->customer resolution |
+| `customer_id_source` | empty | `manual` or `shopper_lookup` |
 | `auto_purchase_enabled` | `false` | Allows `domains purchase --auto` |
 | `acknowledgment_hash` | empty | Non-refund acknowledgement marker |
 | `max_price_per_domain` | `25` | Per-domain purchase cap (USD) |
@@ -218,6 +241,8 @@ Config file: `~/.gdcli/config.json`
 | `default_years` | `1` | Default registration/renew years |
 | `default_dns_template` | `afternic-nameservers` | Default DNS template |
 | `output_default` | `json` | Default output mode |
+
+Writes under v2 command groups are safe-by-default: `--apply` is required for execution; without it commands return dry-run intent payloads.
 
 ## Environment Variables
 

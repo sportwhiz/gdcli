@@ -1,13 +1,18 @@
 package services
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sportwhiz/gdcli/internal/app"
+	"github.com/sportwhiz/gdcli/internal/config"
 	"github.com/sportwhiz/gdcli/internal/godaddy"
+	"github.com/sportwhiz/gdcli/internal/store"
 )
 
 type fakeClient struct{}
@@ -159,5 +164,42 @@ func TestSubscriptionsList(t *testing.T) {
 	}
 	if subs[0].SubscriptionID != "s-1" {
 		t.Fatalf("unexpected subscription id %q", subs[0].SubscriptionID)
+	}
+}
+
+func TestAppendOperationWarningOnFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var errBuf bytes.Buffer
+	rt, err := app.NewRuntime(context.Background(), io.Discard, &errBuf, true, false, true, "req-test")
+	if err != nil {
+		t.Fatalf("runtime: %v", err)
+	}
+
+	cfgDir, err := config.HomeDir()
+	if err != nil {
+		t.Fatalf("home dir: %v", err)
+	}
+	if err := os.RemoveAll(cfgDir); err != nil {
+		t.Fatalf("remove cfg dir: %v", err)
+	}
+	if err := os.WriteFile(cfgDir, []byte("not-a-dir"), 0o600); err != nil {
+		t.Fatalf("write blocking file: %v", err)
+	}
+
+	svc := New(rt, &fakeClient{})
+	svc.appendOperationWithWarning(store.Operation{
+		OperationID: "op-fail",
+		Type:        "purchase",
+		Domain:      "example.com",
+		Amount:      12.99,
+		Currency:    "USD",
+		CreatedAt:   time.Now(),
+		Status:      "succeeded",
+	})
+
+	got := errBuf.String()
+	if !strings.Contains(got, "warning: failed writing operation log for operation_id=op-fail") {
+		t.Fatalf("expected warning in stderr, got %q", got)
 	}
 }

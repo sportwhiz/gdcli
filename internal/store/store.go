@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/sportwhiz/gdcli/internal/config"
@@ -136,4 +138,54 @@ func SaveTokens(ts *TokenStore) error {
 	}
 	b = append(b, '\n')
 	return os.WriteFile(path, b, 0o600)
+}
+
+func LoadAndSaveTokens(mutator func(*TokenStore) error) error {
+	path, err := tokensPath()
+	if err != nil {
+		return err
+	}
+	path = filepath.Clean(path)
+	// #nosec G304 -- path is scoped to ~/.gdcli with fixed filename.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return err
+	}
+	ts := &TokenStore{}
+	if len(b) > 0 {
+		if err := json.Unmarshal(b, ts); err != nil {
+			return err
+		}
+	}
+	if err := mutator(ts); err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(ts, "", "  ")
+	if err != nil {
+		return err
+	}
+	out = append(out, '\n')
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if _, err := f.Write(out); err != nil {
+		return err
+	}
+	return f.Sync()
 }
