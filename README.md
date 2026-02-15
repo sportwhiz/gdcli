@@ -151,6 +151,14 @@ gdcli domains renew alpha.com --years 1 --auto-approve --json
 gdcli domains list --expiring-in 30 --tld com --json
 ```
 
+### Account Intelligence
+
+```bash
+gdcli account orders list --limit 5 --offset 0 --json
+gdcli account subscriptions list --limit 5 --offset 0 --json
+gdcli account orders list --limit 5 --offset 0 --ndjson
+```
+
 ### DNS Audit and Apply
 
 ```bash
@@ -175,6 +183,11 @@ gdcli dns apply --template afternic-nameservers --domains /tmp/portfolio.txt --d
 - `domains renew <domain> --years N [--dry-run] [--auto-approve]`
 - `domains renew-bulk <file> --years N [--dry-run] [--auto-approve]`
 - `domains list [--expiring-in N] [--tld TLD] [--contains TEXT]`
+
+### `account`
+
+- `account orders list [--limit N] [--offset N]`
+- `account subscriptions list [--limit N] [--offset N]`
 
 ### `dns`
 

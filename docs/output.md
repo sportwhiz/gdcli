@@ -10,6 +10,13 @@
 - `--json`: single envelope
 - `--ndjson`: one envelope per record
 
+For list-style commands in NDJSON mode (for example `account orders list` and `account subscriptions list`), each line contains a single item record with:
+
+- `index`
+- `success`
+- `result`
+- `page_context` (`limit`, `offset`, `total`)
+
 Envelope fields:
 
 - `command`

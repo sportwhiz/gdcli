@@ -37,6 +37,38 @@ func (f *fakeClient) Renew(ctx context.Context, domain string, years int, idempo
 func (f *fakeClient) ListDomains(ctx context.Context) ([]godaddy.PortfolioDomain, error) {
 	return []godaddy.PortfolioDomain{{Domain: "alpha.com", Expires: time.Now().AddDate(0, 0, 10).Format("2006-01-02")}}, nil
 }
+func (f *fakeClient) ListOrders(ctx context.Context, limit, offset int) (godaddy.OrdersPage, error) {
+	return godaddy.OrdersPage{
+		Orders: []godaddy.Order{
+			{
+				OrderID:   "o-1",
+				CreatedAt: "2026-01-01T00:00:00Z",
+				Currency:  "USD",
+				Items:     []godaddy.OrderItem{{Label: ".COM Domain Name Registration"}},
+				Pricing:   godaddy.OrderPricing{Total: 10.69, TotalRaw: 10690000, TotalUnit: "micros"},
+			},
+		},
+		Pagination: godaddy.Pagination{Total: 1, Limit: limit, Offset: offset},
+	}, nil
+}
+func (f *fakeClient) ListSubscriptions(ctx context.Context, limit, offset int) (godaddy.SubscriptionsPage, error) {
+	return godaddy.SubscriptionsPage{
+		Subscriptions: []godaddy.Subscription{
+			{
+				SubscriptionID: "s-1",
+				Status:         "ACTIVE",
+				Label:          "EXAMPLE.COM",
+				CreatedAt:      "2026-01-01T00:00:00Z",
+				ExpiresAt:      "2027-01-01T00:00:00Z",
+				Renewable:      true,
+				RenewAuto:      true,
+				Product:        godaddy.SubscriptionProduct{Namespace: "domain", ProductGroupKey: "domains"},
+				Billing:        godaddy.SubscriptionBilling{Status: "CURRENT", RenewAt: "2027-01-01T00:00:00Z"},
+			},
+		},
+		Pagination: godaddy.Pagination{Total: 1, Limit: limit, Offset: offset},
+	}, nil
+}
 func (f *fakeClient) GetNameservers(ctx context.Context, domain string) ([]string, error) {
 	return []string{"ns1.afternic.com", "ns2.afternic.com"}, nil
 }
@@ -95,5 +127,37 @@ func TestAvailabilityBulkConcurrent(t *testing.T) {
 	}
 	if !out[0].Success || !out[1].Success || !out[2].Success {
 		t.Fatalf("expected all successes")
+	}
+}
+
+func TestOrdersList(t *testing.T) {
+	rt := makeRuntime(t)
+	svc := New(rt, &fakeClient{})
+	out, err := svc.OrdersList(context.Background(), 5, 0)
+	if err != nil {
+		t.Fatalf("orders list: %v", err)
+	}
+	orders, ok := out["orders"].([]godaddy.Order)
+	if !ok || len(orders) != 1 {
+		t.Fatalf("expected one order")
+	}
+	if orders[0].Pricing.Total != 10.69 {
+		t.Fatalf("expected normalized total 10.69, got %v", orders[0].Pricing.Total)
+	}
+}
+
+func TestSubscriptionsList(t *testing.T) {
+	rt := makeRuntime(t)
+	svc := New(rt, &fakeClient{})
+	out, err := svc.SubscriptionsList(context.Background(), 5, 0)
+	if err != nil {
+		t.Fatalf("subscriptions list: %v", err)
+	}
+	subs, ok := out["subscriptions"].([]godaddy.Subscription)
+	if !ok || len(subs) != 1 {
+		t.Fatalf("expected one subscription")
+	}
+	if subs[0].SubscriptionID != "s-1" {
+		t.Fatalf("unexpected subscription id %q", subs[0].SubscriptionID)
 	}
 }

@@ -6,6 +6,7 @@
 - `gdcli version [--check]`
 - `gdcli self-update`
 - `gdcli domains ...`
+- `gdcli account ...`
 - `gdcli dns ...`
 - `gdcli settings ...`
 
@@ -35,6 +36,11 @@
 - `gdcli dns apply --template afternic-nameservers --domains <file> [--dry-run]`
 - `gdcli dns apply --template parking --domains <file> [--dry-run]`
 - `gdcli dns apply --template /path/template.json --domains <file> [--dry-run]`
+
+## Account
+
+- `gdcli account orders list [--limit N] [--offset N]`
+- `gdcli account subscriptions list [--limit N] [--offset N]`
 
 ## Settings
 

@@ -412,6 +412,58 @@ func (s *Service) ListPortfolio(ctx context.Context, expiringIn int, tld, contai
 	return out, nil
 }
 
+func (s *Service) OrdersList(ctx context.Context, limit, offset int) (map[string]any, error) {
+	var out godaddy.OrdersPage
+	err := rate.Retry(ctx, 3, func() (bool, error) {
+		if err := s.RT.Limiter.Wait(ctx); err != nil {
+			return false, err
+		}
+		r, err := s.Client.ListOrders(ctx, limit, offset)
+		out = r
+		if err == nil {
+			return false, nil
+		}
+		var ae *apperr.AppError
+		if apperr.As(err, &ae) {
+			return ae.Retryable || ae.Code == apperr.CodeRateLimited, err
+		}
+		return true, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"orders":     out.Orders,
+		"pagination": out.Pagination,
+	}, nil
+}
+
+func (s *Service) SubscriptionsList(ctx context.Context, limit, offset int) (map[string]any, error) {
+	var out godaddy.SubscriptionsPage
+	err := rate.Retry(ctx, 3, func() (bool, error) {
+		if err := s.RT.Limiter.Wait(ctx); err != nil {
+			return false, err
+		}
+		r, err := s.Client.ListSubscriptions(ctx, limit, offset)
+		out = r
+		if err == nil {
+			return false, nil
+		}
+		var ae *apperr.AppError
+		if apperr.As(err, &ae) {
+			return ae.Retryable || ae.Code == apperr.CodeRateLimited, err
+		}
+		return true, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"subscriptions": out.Subscriptions,
+		"pagination":    out.Pagination,
+	}, nil
+}
+
 func (s *Service) DNSAudit(ctx context.Context, domains []string) ([]map[string]any, error) {
 	results := make([]map[string]any, 0, len(domains))
 	for _, d := range domains {

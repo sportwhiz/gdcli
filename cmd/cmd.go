@@ -55,12 +55,14 @@ func run(args []string) error {
 		return runSelfUpdate(rt, rest[1:])
 	case "domains":
 		return runDomains(rt, rest[1:])
+	case "account":
+		return runAccount(rt, rest[1:])
 	case "dns":
 		return runDNS(rt, rest[1:])
 	case "settings":
 		return runSettings(rt, rest[1:])
 	case "--help", "help", "-h":
-		return emitSuccess(rt, "help", map[string]any{"commands": []string{"init", "version", "self-update", "domains", "dns", "settings"}})
+		return emitSuccess(rt, "help", map[string]any{"commands": []string{"init", "version", "self-update", "domains", "account", "dns", "settings"}})
 	default:
 		err := usageError("unknown command: " + rest[0])
 		emitError(rt, "gdcli", err)
@@ -464,6 +466,94 @@ func runDNS(rt *app.Runtime, args []string) error {
 	default:
 		err := usageError("unknown dns subcommand: " + sub)
 		emitError(rt, "dns", err)
+		return err
+	}
+}
+
+func runAccount(rt *app.Runtime, args []string) error {
+	if len(args) == 0 || isHelpToken(args[0]) {
+		return emitSuccess(rt, "account help", map[string]any{
+			"subcommands": []string{"orders list", "subscriptions list"},
+		})
+	}
+	svc, err := newService(rt)
+	if err != nil {
+		emitError(rt, "account", err)
+		return err
+	}
+	if len(args) < 2 {
+		err := usageError("account <orders|subscriptions> list [--limit N] [--offset N]")
+		emitError(rt, "account", err)
+		return err
+	}
+	group := args[0]
+	action := args[1]
+	if action != "list" {
+		err := usageError("account <orders|subscriptions> list [--limit N] [--offset N]")
+		emitError(rt, "account", err)
+		return err
+	}
+
+	flags := parseKVFlags(args[2:])
+	limit := parseIntDefault(flags["limit"], 50)
+	offset := parseIntDefault(flags["offset"], 0)
+	if limit <= 0 {
+		err := &apperr.AppError{Code: apperr.CodeValidation, Message: "limit must be > 0"}
+		emitError(rt, "account "+group+" list", err)
+		return err
+	}
+	if offset < 0 {
+		err := &apperr.AppError{Code: apperr.CodeValidation, Message: "offset must be >= 0"}
+		emitError(rt, "account "+group+" list", err)
+		return err
+	}
+
+	switch group {
+	case "orders":
+		res, err := svc.OrdersList(rt.Ctx, limit, offset)
+		if err != nil {
+			emitError(rt, "account orders list", err)
+			return err
+		}
+		if rt.NDJSON {
+			orders, _ := res["orders"].([]godaddy.Order)
+			pg, _ := res["pagination"].(godaddy.Pagination)
+			rows := make([]any, 0, len(orders))
+			for i, order := range orders {
+				rows = append(rows, map[string]any{
+					"index":        i,
+					"success":      true,
+					"result":       order,
+					"page_context": map[string]any{"limit": pg.Limit, "offset": pg.Offset, "total": pg.Total},
+				})
+			}
+			return emitSuccess(rt, "account orders list", rows)
+		}
+		return emitSuccess(rt, "account orders list", res)
+	case "subscriptions":
+		res, err := svc.SubscriptionsList(rt.Ctx, limit, offset)
+		if err != nil {
+			emitError(rt, "account subscriptions list", err)
+			return err
+		}
+		if rt.NDJSON {
+			subs, _ := res["subscriptions"].([]godaddy.Subscription)
+			pg, _ := res["pagination"].(godaddy.Pagination)
+			rows := make([]any, 0, len(subs))
+			for i, sub := range subs {
+				rows = append(rows, map[string]any{
+					"index":        i,
+					"success":      true,
+					"result":       sub,
+					"page_context": map[string]any{"limit": pg.Limit, "offset": pg.Offset, "total": pg.Total},
+				})
+			}
+			return emitSuccess(rt, "account subscriptions list", rows)
+		}
+		return emitSuccess(rt, "account subscriptions list", res)
+	default:
+		err := usageError("account <orders|subscriptions> list [--limit N] [--offset N]")
+		emitError(rt, "account", err)
 		return err
 	}
 }

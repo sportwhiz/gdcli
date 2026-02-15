@@ -24,6 +24,8 @@ type Client interface {
 	Purchase(ctx context.Context, domain string, years int, idempotencyKey string) (PurchaseResult, error)
 	Renew(ctx context.Context, domain string, years int, idempotencyKey string) (RenewResult, error)
 	ListDomains(ctx context.Context) ([]PortfolioDomain, error)
+	ListOrders(ctx context.Context, limit, offset int) (OrdersPage, error)
+	ListSubscriptions(ctx context.Context, limit, offset int) (SubscriptionsPage, error)
 	GetNameservers(ctx context.Context, domain string) ([]string, error)
 	GetRecords(ctx context.Context, domain string) ([]DNSRecord, error)
 	SetNameservers(ctx context.Context, domain string, nameservers []string) error
@@ -77,6 +79,65 @@ type DNSRecord struct {
 	Name string `json:"name"`
 	Data string `json:"data"`
 	TTL  int    `json:"ttl,omitempty"`
+}
+
+type Pagination struct {
+	First  string `json:"first,omitempty"`
+	Last   string `json:"last,omitempty"`
+	Next   string `json:"next,omitempty"`
+	Total  int    `json:"total"`
+	Limit  int    `json:"limit"`
+	Offset int    `json:"offset"`
+}
+
+type OrderItem struct {
+	Label string `json:"label"`
+}
+
+type OrderPricing struct {
+	Total     float64 `json:"total"`
+	TotalRaw  float64 `json:"total_raw,omitempty"`
+	TotalUnit string  `json:"total_unit,omitempty"`
+}
+
+type Order struct {
+	OrderID   string       `json:"order_id"`
+	CreatedAt string       `json:"created_at,omitempty"`
+	Currency  string       `json:"currency,omitempty"`
+	Items     []OrderItem  `json:"items,omitempty"`
+	Pricing   OrderPricing `json:"pricing"`
+}
+
+type OrdersPage struct {
+	Orders     []Order    `json:"orders"`
+	Pagination Pagination `json:"pagination"`
+}
+
+type SubscriptionProduct struct {
+	Namespace       string `json:"namespace,omitempty"`
+	ProductGroupKey string `json:"product_group_key,omitempty"`
+}
+
+type SubscriptionBilling struct {
+	Status  string `json:"status,omitempty"`
+	RenewAt string `json:"renew_at,omitempty"`
+}
+
+type Subscription struct {
+	SubscriptionID string              `json:"subscription_id"`
+	Status         string              `json:"status,omitempty"`
+	Label          string              `json:"label,omitempty"`
+	CreatedAt      string              `json:"created_at,omitempty"`
+	ExpiresAt      string              `json:"expires_at,omitempty"`
+	Renewable      bool                `json:"renewable"`
+	RenewAuto      bool                `json:"renew_auto"`
+	Product        SubscriptionProduct `json:"product"`
+	Billing        SubscriptionBilling `json:"billing"`
+}
+
+type SubscriptionsPage struct {
+	Subscriptions []Subscription `json:"subscriptions"`
+	Pagination    Pagination     `json:"pagination"`
 }
 
 func NewHTTPClient(baseURL, key, secret string) (*HTTPClient, error) {
@@ -273,6 +334,129 @@ func (c *HTTPClient) ListDomains(ctx context.Context) ([]PortfolioDomain, error)
 	var out []PortfolioDomain
 	if err := c.do(ctx, http.MethodGet, "/v1/domains", nil, &out, ""); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+func (c *HTTPClient) ListOrders(ctx context.Context, limit, offset int) (OrdersPage, error) {
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	q.Set("offset", strconv.Itoa(offset))
+	var raw struct {
+		Orders []struct {
+			OrderID   string `json:"orderId"`
+			CreatedAt string `json:"createdAt"`
+			Currency  string `json:"currency"`
+			Items     []struct {
+				Label string `json:"label"`
+			} `json:"items"`
+			Pricing struct {
+				Total interface{} `json:"total"`
+			} `json:"pricing"`
+		} `json:"orders"`
+		Pagination struct {
+			First string `json:"first"`
+			Last  string `json:"last"`
+			Next  string `json:"next"`
+			Total int    `json:"total"`
+		} `json:"pagination"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/orders?"+q.Encode(), nil, &raw, ""); err != nil {
+		return OrdersPage{}, err
+	}
+	out := OrdersPage{
+		Orders: make([]Order, 0, len(raw.Orders)),
+		Pagination: Pagination{
+			First:  raw.Pagination.First,
+			Last:   raw.Pagination.Last,
+			Next:   raw.Pagination.Next,
+			Total:  raw.Pagination.Total,
+			Limit:  limit,
+			Offset: offset,
+		},
+	}
+	for _, o := range raw.Orders {
+		price, rawPrice, unit := normalizeProviderPrice(o.Pricing.Total)
+		items := make([]OrderItem, 0, len(o.Items))
+		for _, item := range o.Items {
+			items = append(items, OrderItem{Label: item.Label})
+		}
+		out.Orders = append(out.Orders, Order{
+			OrderID:   o.OrderID,
+			CreatedAt: o.CreatedAt,
+			Currency:  o.Currency,
+			Items:     items,
+			Pricing: OrderPricing{
+				Total:     price,
+				TotalRaw:  rawPrice,
+				TotalUnit: unit,
+			},
+		})
+	}
+	return out, nil
+}
+
+func (c *HTTPClient) ListSubscriptions(ctx context.Context, limit, offset int) (SubscriptionsPage, error) {
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	q.Set("offset", strconv.Itoa(offset))
+	var raw struct {
+		Subscriptions []struct {
+			SubscriptionID string `json:"subscriptionId"`
+			Status         string `json:"status"`
+			Label          string `json:"label"`
+			CreatedAt      string `json:"createdAt"`
+			ExpiresAt      string `json:"expiresAt"`
+			Renewable      bool   `json:"renewable"`
+			RenewAuto      bool   `json:"renewAuto"`
+			Product        struct {
+				Namespace       string `json:"namespace"`
+				ProductGroupKey string `json:"productGroupKey"`
+			} `json:"product"`
+			Billing struct {
+				Status  string `json:"status"`
+				RenewAt string `json:"renewAt"`
+			} `json:"billing"`
+		} `json:"subscriptions"`
+		Pagination struct {
+			First string `json:"first"`
+			Last  string `json:"last"`
+			Next  string `json:"next"`
+			Total int    `json:"total"`
+		} `json:"pagination"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/subscriptions?"+q.Encode(), nil, &raw, ""); err != nil {
+		return SubscriptionsPage{}, err
+	}
+	out := SubscriptionsPage{
+		Subscriptions: make([]Subscription, 0, len(raw.Subscriptions)),
+		Pagination: Pagination{
+			First:  raw.Pagination.First,
+			Last:   raw.Pagination.Last,
+			Next:   raw.Pagination.Next,
+			Total:  raw.Pagination.Total,
+			Limit:  limit,
+			Offset: offset,
+		},
+	}
+	for _, s := range raw.Subscriptions {
+		out.Subscriptions = append(out.Subscriptions, Subscription{
+			SubscriptionID: s.SubscriptionID,
+			Status:         s.Status,
+			Label:          s.Label,
+			CreatedAt:      s.CreatedAt,
+			ExpiresAt:      s.ExpiresAt,
+			Renewable:      s.Renewable,
+			RenewAuto:      s.RenewAuto,
+			Product: SubscriptionProduct{
+				Namespace:       s.Product.Namespace,
+				ProductGroupKey: s.Product.ProductGroupKey,
+			},
+			Billing: SubscriptionBilling{
+				Status:  s.Billing.Status,
+				RenewAt: s.Billing.RenewAt,
+			},
+		})
 	}
 	return out, nil
 }
