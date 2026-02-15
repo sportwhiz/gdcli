@@ -512,6 +512,8 @@ func loadCustomTemplate(path string) (*dnsTemplateFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	abs = filepath.Clean(abs)
+	// #nosec G304 -- custom template path is intentionally user-provided local file input.
 	b, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, &apperr.AppError{Code: apperr.CodeValidation, Message: "custom template file not found", Details: map[string]any{"template": abs}}
@@ -527,7 +529,13 @@ func loadCustomTemplate(path string) (*dnsTemplateFile, error) {
 }
 
 func LoadDomainFile(path string) ([]string, error) {
-	f, err := os.Open(path)
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	abs = filepath.Clean(abs)
+	// #nosec G304 -- domain list path is intentionally user-provided local file input.
+	f, err := os.Open(abs)
 	if err != nil {
 		return nil, err
 	}
@@ -545,7 +553,7 @@ func LoadDomainFile(path string) ([]string, error) {
 		return nil, err
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no domains found in %s", path)
+		return nil, fmt.Errorf("no domains found in %s", abs)
 	}
 	return out, nil
 }

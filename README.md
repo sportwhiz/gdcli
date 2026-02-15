@@ -1,22 +1,36 @@
-# GDCLI CLI
+# gdcli
 
-Agent-first GoDaddy domain investor CLI with strict purchase safety defaults, budget guardrails, deterministic JSON/NDJSON output, and local testability via a mock registrar API.
+[![Release](https://img.shields.io/github/v/release/sportwhiz/gdcli)](https://github.com/sportwhiz/gdcli/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/sportwhiz/gdcli/release.yml?branch=main)](https://github.com/sportwhiz/gdcli/actions)
+[![Homebrew Tap](https://img.shields.io/badge/homebrew-sportwhiz%2Ftap-blue)](https://github.com/sportwhiz/homebrew-tap)
+
+GoDaddy-focused, agent-friendly domain investor CLI.
+
+`gdcli` is JSON-first, safe-by-default for purchases, and built for automation tools like OpenClaw.
+
+## Documentation
+
+- [`docs/quickstart.md`](docs/quickstart.md)
+- [`docs/commands.md`](docs/commands.md)
+- [`docs/config.md`](docs/config.md)
+- [`docs/output.md`](docs/output.md)
+- [`docs/architecture.md`](docs/architecture.md)
 
 ## Install
 
-### Homebrew (after first release)
+### Homebrew
 
 ```bash
 brew install sportwhiz/tap/gdcli
 ```
 
-### Go install
+### Go Install
 
 ```bash
 go install github.com/sportwhiz/gdcli/cmd/gdcli@latest
 ```
 
-If needed, add Go bin to `PATH`:
+If needed:
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
@@ -28,49 +42,155 @@ Verify:
 gdcli help --json
 ```
 
-## What is implemented
+## 5-Minute Setup
 
-- Discovery: `domains suggest`, `domains avail`, `domains avail-bulk`
-- Acquisition: dry-run + confirmation token purchase flow, optional `--auto`
-- Renewals: `domains renew`, `domains renew-bulk`
-- Portfolio: `domains list` with filters
-- DNS: `dns audit`, `dns apply` (built-in + custom JSON templates)
-- Settings: `settings auto-purchase enable|disable`, `settings caps set`, `settings show`
-- Safety: non-refundable ack phrase required for auto purchase
-- Budget controls: max price/domain, max daily spend, max domains/day
-- Idempotency ledger and confirmation token store in `~/.gdcli/`
-- Exit codes: `0,2,3,4,5,6,7,8,9`
+1. Set credentials.
 
-## Credentials
+```bash
+export GODADDY_API_KEY="your_key"
+export GODADDY_API_SECRET="your_secret"
+```
 
-Production/OTE usage:
+2. Verify config and auth.
 
-- `GODADDY_API_KEY`
-- `GODADDY_API_SECRET`
+```bash
+gdcli settings show --json
+gdcli domains avail example.com --json
+```
 
-macOS fallback keychain entries (service `gdcli`):
+3. Safe purchase flow (default).
 
-- account `godaddy_api_key`
-- account `godaddy_api_secret`
+```bash
+gdcli domains purchase example.com --json
+# copy confirmation_token
+gdcli domains purchase example.com --confirm <TOKEN> --json
+```
 
-## Output contract
+Bootstrap with guided init:
 
-- Structured payloads on `stdout`
-- Logs/warnings on `stderr`
+```bash
+gdcli init --api-environment prod --max-price 25 --max-daily-spend 100 --max-domains-per-day 5 --verify --json
+```
+
+## Safety Model
+
+- Purchases default to dry-run style with confirmation token.
+- Auto-purchase is disabled by default.
+- Auto-purchase requires explicit non-refund acknowledgment.
+- Budget caps are enforced before financial operations.
+
+Enable auto mode:
+
+```bash
+gdcli settings auto-purchase enable --ack "I UNDERSTAND PURCHASES ARE FINAL" --json
+```
+
+## Output Model
+
+- `stdout`: structured JSON/NDJSON only.
+- `stderr`: logs and warnings.
 - Global flags:
   - `--json` (default)
   - `--ndjson`
   - `--quiet`
 
-## Fast local test (no real GoDaddy calls)
+## Common Workflows
 
-1. Start mock API:
+### Discovery
+
+```bash
+gdcli domains suggest "garlic bread" --limit 10 --json
+gdcli domains avail garlicbread.com --json
+```
+
+### Bulk Availability
+
+```bash
+printf "alpha.com\nbeta.ai\ngamma.net\n" > /tmp/domains.txt
+gdcli domains avail-bulk /tmp/domains.txt --concurrency 5 --ndjson
+```
+
+### Renewals
+
+```bash
+gdcli domains renew alpha.com --years 1 --dry-run --json
+gdcli domains renew alpha.com --years 1 --auto-approve --json
+```
+
+### Portfolio Filter
+
+```bash
+gdcli domains list --expiring-in 30 --tld com --json
+```
+
+### DNS Audit and Apply
+
+```bash
+printf "alpha.com\nbrand.ai\n" > /tmp/portfolio.txt
+gdcli dns audit --domains /tmp/portfolio.txt --json
+gdcli dns apply --template afternic-nameservers --domains /tmp/portfolio.txt --dry-run --json
+```
+
+## Commands
+
+### `domains`
+
+- `domains suggest <query> [--tlds com,ai] [--limit N]`
+- `domains avail <domain>`
+- `domains avail-bulk <file> [--concurrency N]`
+- `domains purchase <domain> [--confirm TOKEN] [--auto] [--years N]`
+- `domains renew <domain> --years N [--dry-run] [--auto-approve]`
+- `domains renew-bulk <file> --years N [--dry-run] [--auto-approve]`
+- `domains list [--expiring-in N] [--tld TLD] [--contains TEXT]`
+
+### `dns`
+
+- `dns audit --domains <file>`
+- `dns apply --template <afternic-nameservers|parking|template.json> --domains <file> [--dry-run]`
+
+### `settings`
+
+- `settings auto-purchase enable --ack "I UNDERSTAND PURCHASES ARE FINAL"`
+- `settings auto-purchase disable`
+- `settings caps set --max-price USD --max-daily-spend USD --max-domains-per-day N`
+- `settings show`
+
+## Configuration
+
+Config file: `~/.gdcli/config.json`
+
+| Key | Default | Purpose |
+|---|---:|---|
+| `api_environment` | `prod` | GoDaddy environment (`prod` or `ote`) |
+| `auto_purchase_enabled` | `false` | Allows `domains purchase --auto` |
+| `acknowledgment_hash` | empty | Non-refund acknowledgement marker |
+| `max_price_per_domain` | `25` | Per-domain purchase cap (USD) |
+| `max_daily_spend` | `100` | Daily spend cap (USD) |
+| `max_domains_per_day` | `5` | Daily domain count cap |
+| `default_years` | `1` | Default registration/renew years |
+| `default_dns_template` | `afternic-nameservers` | Default DNS template |
+| `output_default` | `json` | Default output mode |
+
+## Environment Variables
+
+- `GODADDY_API_KEY`
+- `GODADDY_API_SECRET`
+- `GDCLI_BASE_URL` (optional API override for testing)
+
+macOS keychain fallback is supported under service `gdcli` with accounts:
+
+- `godaddy_api_key`
+- `godaddy_api_secret`
+
+## Local Mock Testing (No Real Registrar Calls)
+
+1. Start mock server.
 
 ```bash
 go run ./cmd/mock-godaddy
 ```
 
-2. In another shell, set test env:
+2. In another shell.
 
 ```bash
 export GDCLI_BASE_URL=http://localhost:8787
@@ -78,31 +198,16 @@ export GODADDY_API_KEY=dummy
 export GODADDY_API_SECRET=dummy
 ```
 
-3. Run sample flows:
+3. Run commands.
 
 ```bash
-go run . settings show --json
-go run . domains suggest "garlic bread" --limit 3 --json
-go run . domains avail example.com --json
-printf "example.com\nnewbrand.ai\n" > /tmp/domains.txt
-go run . domains avail-bulk /tmp/domains.txt --concurrency 2 --ndjson
-
-go run . domains purchase example.com --json
-# copy confirmation_token from output
-# go run . domains purchase example.com --confirm <TOKEN> --json
-
-go run . settings auto-purchase enable --ack "I UNDERSTAND PURCHASES ARE FINAL" --json
-go run . domains purchase newbrand.ai --auto --json
-
-go run . domains list --tld com --json
-printf "alpha.com\nbrand.ai\n" > /tmp/portfolio.txt
-go run . dns audit --domains /tmp/portfolio.txt --json
-go run . dns apply --template afternic-nameservers --domains /tmp/portfolio.txt --dry-run --json
+gdcli domains avail example.com --json
+gdcli domains purchase example.com --json
 ```
 
-## Custom DNS template format
+## Custom DNS Template
 
-Use a JSON file with either/both keys:
+Template JSON supports either or both keys.
 
 ```json
 {
@@ -113,40 +218,72 @@ Use a JSON file with either/both keys:
 }
 ```
 
-Then apply:
+Apply:
 
 ```bash
-go run . dns apply --template /path/to/template.json --domains /tmp/portfolio.txt --json
+gdcli dns apply --template /path/to/template.json --domains /tmp/portfolio.txt --json
 ```
 
-## Build and verify
+## Exit Codes
+
+- `0`: success
+- `2`: validation/usage error
+- `3`: auth/credentials error
+- `4`: provider rate limit exhausted
+- `5`: provider/internal error
+- `6`: budget violation
+- `7`: confirmation token error
+- `8`: safety policy violation
+- `9`: partial failure
+
+## Troubleshooting
+
+### `auth_error` / missing credentials
+
+Set both `GODADDY_API_KEY` and `GODADDY_API_SECRET`, then re-run.
+
+### Budget violations (`exit 6`)
+
+Increase caps with:
+
+```bash
+gdcli settings caps set --max-price 50 --max-daily-spend 500 --max-domains-per-day 20 --json
+```
+
+### Auto-purchase blocked (`exit 8`)
+
+Enable with exact phrase:
+
+```bash
+gdcli settings auto-purchase enable --ack "I UNDERSTAND PURCHASES ARE FINAL" --json
+```
+
+### Bulk command partial failures (`exit 9`)
+
+Use `--ndjson` and inspect per-line errors for domains that failed.
+
+## Development
 
 ```bash
 go test ./...
-go run . --help
+go run ./cmd/gdcli help --json
 ```
 
-## Maintainer release setup (GitHub + Homebrew tap)
+## Release Maintainer Notes
 
-This repo includes:
+Release config lives in `.goreleaser.yaml` and `.github/workflows/release.yml`.
 
-- GoReleaser config: `.goreleaser.yaml`
-- GitHub release workflow: `.github/workflows/release.yml`
+Required setup:
 
-One-time setup:
+1. Repo: `sportwhiz/gdcli`
+2. Tap repo: `sportwhiz/homebrew-tap`
+3. Secret in `sportwhiz/gdcli`: `HOMEBREW_TAP_GITHUB_TOKEN`
 
-1. Create tap repo: `https://github.com/sportwhiz/homebrew-tap`
-2. Add repo secret `HOMEBREW_TAP_GITHUB_TOKEN` in `sportwhiz/gdcli` (token needs `repo` scope to push formula updates to `sportwhiz/homebrew-tap`).
-3. Push a semver tag:
+Release:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
-On tag push, GitHub Actions will:
-
-- run tests
-- build binaries for macOS/Linux/Windows
-- create GitHub Release artifacts + checksums
-- update Homebrew formula in `sportwhiz/homebrew-tap/Formula/gdcli.rb`
+This publishes binaries/checksums to GitHub Releases and updates `Formula/gdcli.rb` in the tap repo.

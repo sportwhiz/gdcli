@@ -62,6 +62,8 @@ func AppendOperation(op Operation) error {
 	if err != nil {
 		return err
 	}
+	path = filepath.Clean(path)
+	// #nosec G304 -- path is scoped to ~/.gdcli with fixed filename.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -76,6 +78,8 @@ func ReadOperations() ([]Operation, error) {
 	if err != nil {
 		return nil, err
 	}
+	path = filepath.Clean(path)
+	// #nosec G304 -- path is scoped to ~/.gdcli with fixed filename.
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -105,6 +109,8 @@ func LoadTokens() (*TokenStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	path = filepath.Clean(path)
+	// #nosec G304 -- path is scoped to ~/.gdcli with fixed filename.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

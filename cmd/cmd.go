@@ -47,6 +47,8 @@ func run(args []string) error {
 	}
 
 	switch rest[0] {
+	case "init":
+		return runInit(rt, rest[1:])
 	case "domains":
 		return runDomains(rt, rest[1:])
 	case "dns":
@@ -54,7 +56,7 @@ func run(args []string) error {
 	case "settings":
 		return runSettings(rt, rest[1:])
 	case "--help", "help", "-h":
-		return emitSuccess(rt, "help", map[string]any{"commands": []string{"domains", "dns", "settings"}})
+		return emitSuccess(rt, "help", map[string]any{"commands": []string{"init", "domains", "dns", "settings"}})
 	default:
 		err := usageError("unknown command: " + rest[0])
 		emitError(rt, "gdcli", err)
@@ -78,6 +80,126 @@ func parseGlobalFlags(args []string) (globalFlags, []string, error) {
 		}
 	}
 	return g, rest, nil
+}
+
+func runInit(rt *app.Runtime, args []string) error {
+	if len(args) > 0 && isHelpToken(args[0]) {
+		return emitSuccess(rt, "init help", map[string]any{
+			"usage": "gdcli init [--api-environment prod|ote] [--max-price N] [--max-daily-spend N] [--max-domains-per-day N] [--enable-auto-purchase --ack \"I UNDERSTAND PURCHASES ARE FINAL\"] [--store-keychain --api-key KEY --api-secret SECRET] [--verify]",
+		})
+	}
+
+	flags := parseKVFlags(args)
+	changed := map[string]any{}
+
+	if env := strings.TrimSpace(flags["api-environment"]); env != "" {
+		if env != "prod" && env != "ote" {
+			err := &apperr.AppError{Code: apperr.CodeValidation, Message: "api-environment must be prod or ote"}
+			emitError(rt, "init", err)
+			return err
+		}
+		rt.Cfg.APIEnvironment = env
+		changed["api_environment"] = env
+	}
+	if v := strings.TrimSpace(flags["max-price"]); v != "" {
+		n := parseFloatDefault(v, -1)
+		if n <= 0 {
+			err := &apperr.AppError{Code: apperr.CodeValidation, Message: "max-price must be > 0"}
+			emitError(rt, "init", err)
+			return err
+		}
+		rt.Cfg.MaxPricePerDomain = n
+		changed["max_price_per_domain"] = n
+	}
+	if v := strings.TrimSpace(flags["max-daily-spend"]); v != "" {
+		n := parseFloatDefault(v, -1)
+		if n <= 0 {
+			err := &apperr.AppError{Code: apperr.CodeValidation, Message: "max-daily-spend must be > 0"}
+			emitError(rt, "init", err)
+			return err
+		}
+		rt.Cfg.MaxDailySpend = n
+		changed["max_daily_spend"] = n
+	}
+	if v := strings.TrimSpace(flags["max-domains-per-day"]); v != "" {
+		n := parseIntDefault(v, -1)
+		if n <= 0 {
+			err := &apperr.AppError{Code: apperr.CodeValidation, Message: "max-domains-per-day must be > 0"}
+			emitError(rt, "init", err)
+			return err
+		}
+		rt.Cfg.MaxDomainsPerDay = n
+		changed["max_domains_per_day"] = n
+	}
+
+	if hasBoolFlag(args, "enable-auto-purchase") {
+		ack := strings.TrimSpace(flags["ack"])
+		hash, err := safety.EnableAutoPurchase(ack)
+		if err != nil {
+			emitError(rt, "init", err)
+			return err
+		}
+		rt.Cfg.AutoPurchaseEnabled = true
+		rt.Cfg.AcknowledgmentHash = hash
+		changed["auto_purchase_enabled"] = true
+	}
+
+	if len(changed) > 0 {
+		if err := config.Save(rt.Cfg); err != nil {
+			ae := &apperr.AppError{Code: apperr.CodeInternal, Message: "failed saving config", Cause: err}
+			emitError(rt, "init", ae)
+			return ae
+		}
+	}
+
+	keychainStored := false
+	if hasBoolFlag(args, "store-keychain") {
+		apiKey := strings.TrimSpace(flags["api-key"])
+		apiSecret := strings.TrimSpace(flags["api-secret"])
+		if apiKey == "" || apiSecret == "" {
+			err := &apperr.AppError{Code: apperr.CodeValidation, Message: "--store-keychain requires --api-key and --api-secret"}
+			emitError(rt, "init", err)
+			return err
+		}
+		if err := app.StoreCredentialsInKeychain(apiKey, apiSecret); err != nil {
+			emitError(rt, "init", err)
+			return err
+		}
+		keychainStored = true
+	}
+
+	verified := false
+	verifyResult := map[string]any{"ok": false}
+	if hasBoolFlag(args, "verify") {
+		svc, err := newService(rt)
+		if err != nil {
+			emitError(rt, "init", err)
+			return err
+		}
+		avail, err := svc.Availability(rt.Ctx, "example.com")
+		if err != nil {
+			emitError(rt, "init", err)
+			return err
+		}
+		verified = true
+		verifyResult = map[string]any{"ok": true, "sample_domain": avail.Domain}
+	}
+
+	configPath, _ := config.Path()
+	res := map[string]any{
+		"configured":        len(changed) > 0,
+		"changed":           changed,
+		"config_path":       configPath,
+		"keychain_stored":   keychainStored,
+		"verified":          verified,
+		"verification_info": verifyResult,
+		"next_steps": []string{
+			"set GODADDY_API_KEY and GODADDY_API_SECRET (or use --store-keychain on macOS)",
+			"run: gdcli settings show --json",
+			"run: gdcli domains avail example.com --json",
+		},
+	}
+	return emitSuccess(rt, "init", res)
 }
 
 func runDomains(rt *app.Runtime, args []string) error {
@@ -519,7 +641,10 @@ func newService(rt *app.Runtime) (*services.Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := godaddy.NewHTTPClient(app.BaseURL(rt.Cfg.APIEnvironment), creds.APIKey, creds.APISecret)
+	client, err := godaddy.NewHTTPClient(app.BaseURL(rt.Cfg.APIEnvironment), creds.APIKey(), creds.APISecret())
+	if err != nil {
+		return nil, err
+	}
 	return services.New(rt, client), nil
 }
 

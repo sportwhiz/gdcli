@@ -2,7 +2,8 @@ package rate
 
 import (
 	"context"
-	"math/rand"
+	"crypto/rand"
+	"math/big"
 	"sync"
 	"time"
 
@@ -62,7 +63,7 @@ func Retry(ctx context.Context, attempts int, fn func() (bool, error)) error {
 		if i == attempts-1 {
 			return &apperr.AppError{Code: apperr.CodeRateLimited, Message: "request exhausted retries", Retryable: true, Cause: err}
 		}
-		jitter := time.Duration(rand.Intn(250)) * time.Millisecond
+		jitter := time.Duration(randomIntn(250)) * time.Millisecond
 		wait := base*(1<<i) + jitter
 		select {
 		case <-ctx.Done():
@@ -71,4 +72,15 @@ func Retry(ctx context.Context, attempts int, fn func() (bool, error)) error {
 		}
 	}
 	return nil
+}
+
+func randomIntn(max int) int {
+	if max <= 1 {
+		return 0
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
+	if err != nil {
+		return 0
+	}
+	return int(n.Int64())
 }
