@@ -62,7 +62,10 @@ If you are using OpenClaw, also complete skill setup:
 ```bash
 export GODADDY_API_KEY="your_key"
 export GODADDY_API_SECRET="your_secret"
+export GDCLI_SHOPPER_ID="<YOUR_SHOPPER_ID>"
 ```
+
+Use placeholders in shared docs/snippets. Do not publish real shopper IDs.
 
 2. Verify config and auth.
 
@@ -82,7 +85,7 @@ gdcli domains purchase example.com --confirm <TOKEN> --json
 Bootstrap with guided init:
 
 ```bash
-gdcli init --api-environment prod --shopper-id 660323812 --resolve-customer-id --max-price 25 --max-daily-spend 100 --max-domains-per-day 5 --verify --json
+gdcli init --api-environment prod --resolve-customer-id --max-price 25 --max-daily-spend 100 --max-domains-per-day 5 --verify --json
 ```
 
 Confirm identity was stored for v2 customer-scoped calls:
@@ -254,6 +257,8 @@ Writes under v2 command groups are safe-by-default: `--apply` is required for ex
 
 - `GODADDY_API_KEY`
 - `GODADDY_API_SECRET`
+- `GDCLI_SHOPPER_ID` (optional; used for customer-id resolution)
+- `GDCLI_CUSTOMER_ID` (optional; overrides stored customer_id)
 - `GDCLI_BASE_URL` (optional API override for testing)
 - `GDCLI_DISABLE_UPDATE_CHECK` (`1`/`true`/`yes` to disable startup update notices)
 

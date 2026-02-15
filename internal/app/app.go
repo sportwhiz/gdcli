@@ -40,6 +40,7 @@ func NewRuntime(ctx context.Context, stdOut, stdErr io.Writer, jsonMode, ndjsonM
 	if err != nil {
 		return nil, apperr.Wrap(apperr.CodeInternal, "failed loading config", err)
 	}
+	applyIdentityEnvOverrides(cfg)
 	return &Runtime{
 		Ctx:       ctx,
 		Cfg:       cfg,
@@ -51,6 +52,21 @@ func NewRuntime(ctx context.Context, stdOut, stdErr io.Writer, jsonMode, ndjsonM
 		Quiet:     quiet,
 		RequestID: requestID,
 	}, nil
+}
+
+func applyIdentityEnvOverrides(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if shopper := strings.TrimSpace(os.Getenv("GDCLI_SHOPPER_ID")); shopper != "" {
+		cfg.ShopperID = shopper
+	}
+	if customer := strings.TrimSpace(os.Getenv("GDCLI_CUSTOMER_ID")); customer != "" {
+		cfg.CustomerID = customer
+		if cfg.CustomerIDSource == "" {
+			cfg.CustomerIDSource = "env"
+		}
+	}
 }
 
 func LoadCredentials() (Credentials, error) {

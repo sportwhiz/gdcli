@@ -26,3 +26,8 @@ In `~/.gdcli/`:
 
 - `operations.jsonl`: idempotency + spend ledger
 - `confirm_tokens.json`: purchase confirmation tokens
+
+## Environment identity overrides
+
+- `GDCLI_SHOPPER_ID`: if set, overrides `shopper_id` in runtime config
+- `GDCLI_CUSTOMER_ID`: if set, overrides `customer_id` in runtime config

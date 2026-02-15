@@ -88,7 +88,7 @@ func TestRunAccountIdentitySetAndShow(t *testing.T) {
 	defer srv.Close()
 
 	rt, out := testRuntime(t, srv.URL, true, false)
-	if err := runAccount(rt, []string{"identity", "set", "--shopper-id", "660323812", "--customer-id", "cust-123"}); err != nil {
+	if err := runAccount(rt, []string{"identity", "set", "--shopper-id", "123456789", "--customer-id", "cust-123"}); err != nil {
 		t.Fatalf("account identity set: %v", err)
 	}
 	out.Reset()
@@ -103,7 +103,7 @@ func TestRunAccountIdentitySetAndShow(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing result")
 	}
-	if result["shopper_id"] != "660323812" || result["customer_id"] != "cust-123" {
+	if result["shopper_id"] != "123456789" || result["customer_id"] != "cust-123" {
 		t.Fatalf("unexpected identity values: %+v", result)
 	}
 }
