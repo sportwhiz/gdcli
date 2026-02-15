@@ -96,8 +96,8 @@ func renewPriceMicros(v any) (int64, error) {
 	}
 }
 
-func (s *Service) buildRenewV2Request(ctx context.Context, v2c v2RouterClient, domain string, years int) (godaddy.RenewV2Request, error) {
-	detail, err := v2c.DomainDetailV2(ctx, s.RT.Cfg.CustomerID, domain, nil)
+func (s *Service) buildRenewV2Request(ctx context.Context, v2c v2RouterClient, customerID, domain string, years int) (godaddy.RenewV2Request, error) {
+	detail, err := v2c.DomainDetailV2(ctx, customerID, domain, nil)
 	if err != nil {
 		return godaddy.RenewV2Request{}, err
 	}
@@ -143,6 +143,26 @@ func (s *Service) buildRenewV2Request(ctx context.Context, v2c v2RouterClient, d
 	}, nil
 }
 
+func (s *Service) renewV2CustomerCandidates() []string {
+	out := make([]string, 0, 2)
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		for _, cur := range out {
+			if cur == v {
+				return
+			}
+		}
+		out = append(out, v)
+	}
+	// Keep stored customer_id as primary, then try shopper_id for endpoints that require it.
+	add(s.RT.Cfg.CustomerID)
+	add(s.RT.Cfg.ShopperID)
+	return out
+}
+
 func (s *Service) v2Client() (v2RouterClient, bool) {
 	c, ok := s.Client.(v2RouterClient)
 	return c, ok
@@ -175,6 +195,149 @@ func (s *Service) appendOperationWithWarning(op store.Operation) {
 	if err := store.AppendOperation(op); err != nil {
 		output.LogErr(s.RT.ErrOut, "warning: failed writing operation log for operation_id=%s: %v", op.OperationID, err)
 	}
+}
+
+func (s *Service) reserveOperation(opType, domain string, amount float64, currency, operationID string, now time.Time) (bool, error) {
+	alreadySucceeded := false
+	err := store.LoadAndSaveOperations(func(ops *[]store.Operation) error {
+		dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		dayEnd := dayStart.Add(24 * time.Hour)
+
+		totalSpend := 0.0
+		totalDomains := 0
+		for _, op := range *ops {
+			if op.OperationID == operationID {
+				switch op.Status {
+				case "succeeded":
+					alreadySucceeded = true
+					return nil
+				case "pending":
+					return &apperr.AppError{
+						Code:    apperr.CodeRateLimited,
+						Message: "operation already in progress",
+						Details: map[string]any{"operation_id": operationID},
+					}
+				}
+			}
+			if op.CreatedAt.Before(dayStart) || !op.CreatedAt.Before(dayEnd) {
+				continue
+			}
+			if op.Type != "purchase" && op.Type != "renew" {
+				continue
+			}
+			if op.Status != "succeeded" && op.Status != "pending" {
+				continue
+			}
+			totalSpend += op.Amount
+			totalDomains++
+		}
+
+		if totalSpend+amount > s.RT.Cfg.MaxDailySpend {
+			return &apperr.AppError{
+				Code:    apperr.CodeBudget,
+				Message: "daily spend cap exceeded",
+				Details: map[string]any{"attempted_total": totalSpend + amount, "max_daily_spend": s.RT.Cfg.MaxDailySpend},
+			}
+		}
+		if totalDomains+1 > s.RT.Cfg.MaxDomainsPerDay {
+			return &apperr.AppError{
+				Code:    apperr.CodeBudget,
+				Message: "daily domain count cap exceeded",
+				Details: map[string]any{"attempted_total": totalDomains + 1, "max_domains_per_day": s.RT.Cfg.MaxDomainsPerDay},
+			}
+		}
+
+		*ops = append(*ops, store.Operation{
+			OperationID: operationID,
+			Type:        opType,
+			Domain:      domain,
+			Amount:      amount,
+			Currency:    currency,
+			CreatedAt:   now,
+			Status:      "pending",
+		})
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return alreadySucceeded, nil
+}
+
+func (s *Service) finalizeOperation(operationID string, amount float64, currency, status string) error {
+	now := time.Now()
+	var policyErr error
+	err := store.LoadAndSaveOperations(func(ops *[]store.Operation) error {
+		index := -1
+		for i := range *ops {
+			if (*ops)[i].OperationID == operationID {
+				index = i
+			}
+		}
+		if index < 0 {
+			*ops = append(*ops, store.Operation{
+				OperationID: operationID,
+				Type:        "unknown",
+				Amount:      amount,
+				Currency:    currency,
+				CreatedAt:   now,
+				Status:      status,
+			})
+			return nil
+		}
+
+		op := (*ops)[index]
+		if status == "succeeded" {
+			dayStart := time.Date(op.CreatedAt.Year(), op.CreatedAt.Month(), op.CreatedAt.Day(), 0, 0, 0, 0, op.CreatedAt.Location())
+			dayEnd := dayStart.Add(24 * time.Hour)
+			totalSpend := 0.0
+			totalDomains := 0
+			for i, existing := range *ops {
+				if i == index {
+					continue
+				}
+				if existing.CreatedAt.Before(dayStart) || !existing.CreatedAt.Before(dayEnd) {
+					continue
+				}
+				if existing.Type != "purchase" && existing.Type != "renew" {
+					continue
+				}
+				if existing.Status != "succeeded" && existing.Status != "pending" {
+					continue
+				}
+				totalSpend += existing.Amount
+				totalDomains++
+			}
+			if totalSpend+amount > s.RT.Cfg.MaxDailySpend {
+				policyErr = &apperr.AppError{
+					Code:    apperr.CodeBudget,
+					Message: "daily spend cap exceeded by finalized provider amount",
+					Details: map[string]any{"attempted_total": totalSpend + amount, "max_daily_spend": s.RT.Cfg.MaxDailySpend},
+				}
+				status = "failed"
+			}
+			if totalDomains+1 > s.RT.Cfg.MaxDomainsPerDay {
+				policyErr = &apperr.AppError{
+					Code:    apperr.CodeBudget,
+					Message: "daily domain count cap exceeded by finalized provider amount",
+					Details: map[string]any{"attempted_total": totalDomains + 1, "max_domains_per_day": s.RT.Cfg.MaxDomainsPerDay},
+				}
+				status = "failed"
+			}
+		}
+
+		op.Amount = amount
+		if strings.TrimSpace(currency) != "" {
+			op.Currency = currency
+		}
+		op.Status = status
+		(*ops)[index] = op
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return policyErr
 }
 
 func (s *Service) Suggest(ctx context.Context, query string, tlds []string, limit int) (map[string]any, error) {
@@ -405,22 +568,19 @@ func (s *Service) PurchaseDryRun(ctx context.Context, domain string, years int) 
 }
 
 func (s *Service) PurchaseConfirm(ctx context.Context, domain, token string, years int) (godaddy.PurchaseResult, error) {
-	tok, err := safety.ValidateAndUseToken(token, domain, time.Now())
+	tok, err := safety.ValidateToken(token, domain, time.Now())
 	if err != nil {
 		return godaddy.PurchaseResult{}, err
 	}
 	if err := budget.CheckPrice(s.RT.Cfg, tok.QuotedPrice, tok.Currency); err != nil {
 		return godaddy.PurchaseResult{}, err
 	}
-	if err := budget.CheckDailyCaps(s.RT.Cfg, time.Now(), tok.QuotedPrice); err != nil {
-		return godaddy.PurchaseResult{}, err
-	}
-
-	already, err := idempotency.AlreadySucceeded(tok.OperationKey)
+	already, err := s.reserveOperation("purchase", domain, tok.QuotedPrice, tok.Currency, tok.OperationKey, time.Now())
 	if err != nil {
 		return godaddy.PurchaseResult{}, err
 	}
 	if already {
+		_ = safety.MarkTokenUsed(token, domain, time.Now())
 		return godaddy.PurchaseResult{Domain: domain, Price: tok.QuotedPrice, Currency: tok.Currency, AlreadyBought: true}, nil
 	}
 
@@ -441,6 +601,7 @@ func (s *Service) PurchaseConfirm(ctx context.Context, domain, token string, yea
 		return true, err
 	})
 	if err != nil {
+		_ = s.finalizeOperation(tok.OperationKey, tok.QuotedPrice, tok.Currency, "failed")
 		return godaddy.PurchaseResult{}, err
 	}
 
@@ -450,15 +611,14 @@ func (s *Service) PurchaseConfirm(ctx context.Context, domain, token string, yea
 	if result.Currency == "" {
 		result.Currency = tok.Currency
 	}
-	s.appendOperationWithWarning(store.Operation{
-		OperationID: tok.OperationKey,
-		Type:        "purchase",
-		Domain:      domain,
-		Amount:      result.Price,
-		Currency:    result.Currency,
-		CreatedAt:   time.Now(),
-		Status:      "succeeded",
-	})
+	if err := budget.CheckPrice(s.RT.Cfg, result.Price, result.Currency); err != nil {
+		_ = s.finalizeOperation(tok.OperationKey, result.Price, result.Currency, "failed")
+		return godaddy.PurchaseResult{}, err
+	}
+	if err := s.finalizeOperation(tok.OperationKey, result.Price, result.Currency, "succeeded"); err != nil {
+		return godaddy.PurchaseResult{}, err
+	}
+	_ = safety.MarkTokenUsed(token, domain, time.Now())
 	return result, nil
 }
 
@@ -476,11 +636,8 @@ func (s *Service) PurchaseAuto(ctx context.Context, domain string, years int) (g
 	if err := budget.CheckPrice(s.RT.Cfg, avail.Price, avail.Currency); err != nil {
 		return godaddy.PurchaseResult{}, err
 	}
-	if err := budget.CheckDailyCaps(s.RT.Cfg, time.Now(), avail.Price); err != nil {
-		return godaddy.PurchaseResult{}, err
-	}
 	opKey := idempotency.OperationKey("purchase", domain, avail.Price, time.Now())
-	already, err := idempotency.AlreadySucceeded(opKey)
+	already, err := s.reserveOperation("purchase", domain, avail.Price, avail.Currency, opKey, time.Now())
 	if err != nil {
 		return godaddy.PurchaseResult{}, err
 	}
@@ -504,6 +661,7 @@ func (s *Service) PurchaseAuto(ctx context.Context, domain string, years int) (g
 		return true, err
 	})
 	if err != nil {
+		_ = s.finalizeOperation(opKey, avail.Price, avail.Currency, "failed")
 		return godaddy.PurchaseResult{}, err
 	}
 	if result.Price == 0 {
@@ -512,15 +670,13 @@ func (s *Service) PurchaseAuto(ctx context.Context, domain string, years int) (g
 	if result.Currency == "" {
 		result.Currency = avail.Currency
 	}
-	s.appendOperationWithWarning(store.Operation{
-		OperationID: opKey,
-		Type:        "purchase",
-		Domain:      domain,
-		Amount:      result.Price,
-		Currency:    result.Currency,
-		CreatedAt:   time.Now(),
-		Status:      "succeeded",
-	})
+	if err := budget.CheckPrice(s.RT.Cfg, result.Price, result.Currency); err != nil {
+		_ = s.finalizeOperation(opKey, result.Price, result.Currency, "failed")
+		return godaddy.PurchaseResult{}, err
+	}
+	if err := s.finalizeOperation(opKey, result.Price, result.Currency, "succeeded"); err != nil {
+		return godaddy.PurchaseResult{}, err
+	}
 	return result, nil
 }
 
@@ -533,14 +689,11 @@ func (s *Service) Renew(ctx context.Context, domain string, years int, dryRun bo
 	if err := budget.CheckPrice(s.RT.Cfg, priceEstimate, currency); err != nil {
 		return nil, err
 	}
-	if err := budget.CheckDailyCaps(s.RT.Cfg, time.Now(), priceEstimate); err != nil {
-		return nil, err
-	}
 	if dryRun {
 		return map[string]any{"domain": domain, "years": years, "dry_run": true, "price": priceEstimate, "currency": currency}, nil
 	}
 	opKey := idempotency.OperationKey("renew", domain, priceEstimate, time.Now())
-	already, err := idempotency.AlreadySucceeded(opKey)
+	already, err := s.reserveOperation("renew", domain, priceEstimate, currency, opKey, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -553,17 +706,29 @@ func (s *Service) Renew(ctx context.Context, domain string, years int, dryRun bo
 		if err := s.RT.Limiter.Wait(ctx); err != nil {
 			return false, err
 		}
-		useV2 := canUseV2(s.RT.Cfg.CustomerID)
+		useV2 := canUseV2(s.RT.Cfg.CustomerID) || strings.TrimSpace(s.RT.Cfg.ShopperID) != ""
 		var r godaddy.RenewResult
 		if v2c, ok := s.v2Client(); ok && useV2 {
 			out, used, callErr := doV2ThenV1(
 				true,
 				func() (godaddy.RenewResult, error) {
-					req, reqErr := s.buildRenewV2Request(ctx, v2c, domain, years)
-					if reqErr != nil {
-						return godaddy.RenewResult{}, reqErr
+					var lastErr error
+					for _, customerID := range s.renewV2CustomerCandidates() {
+						req, reqErr := s.buildRenewV2Request(ctx, v2c, customerID, domain, years)
+						if reqErr != nil {
+							lastErr = reqErr
+							continue
+						}
+						renewRes, renewErr := v2c.RenewV2(ctx, customerID, domain, req, opKey)
+						if renewErr == nil {
+							return renewRes, nil
+						}
+						lastErr = renewErr
 					}
-					return v2c.RenewV2(ctx, s.RT.Cfg.CustomerID, domain, req, opKey)
+					if lastErr != nil {
+						return godaddy.RenewResult{}, lastErr
+					}
+					return godaddy.RenewResult{}, &apperr.AppError{Code: apperr.CodeValidation, Message: "v2 renew requires customer_id or shopper_id"}
 				},
 				func() (godaddy.RenewResult, error) {
 					return s.Client.Renew(ctx, domain, years, opKey)
@@ -586,6 +751,7 @@ func (s *Service) Renew(ctx context.Context, domain string, years int, dryRun bo
 		return true, err
 	})
 	if err != nil {
+		_ = s.finalizeOperation(opKey, priceEstimate, currency, "failed")
 		return nil, err
 	}
 	if rr.Price == 0 {
@@ -594,7 +760,13 @@ func (s *Service) Renew(ctx context.Context, domain string, years int, dryRun bo
 	if rr.Currency == "" {
 		rr.Currency = currency
 	}
-	s.appendOperationWithWarning(store.Operation{OperationID: opKey, Type: "renew", Domain: domain, Amount: rr.Price, Currency: rr.Currency, CreatedAt: time.Now(), Status: "succeeded"})
+	if err := budget.CheckPrice(s.RT.Cfg, rr.Price, rr.Currency); err != nil {
+		_ = s.finalizeOperation(opKey, rr.Price, rr.Currency, "failed")
+		return nil, err
+	}
+	if err := s.finalizeOperation(opKey, rr.Price, rr.Currency, "succeeded"); err != nil {
+		return nil, err
+	}
 	apiVersion := "v1"
 	if usedV2 {
 		apiVersion = "v2"

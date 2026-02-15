@@ -11,11 +11,12 @@ import (
 
 type fakeV2Client struct {
 	fakeClient
-	v2DetailErr error
-	v2NSErr     error
-	v2RenewErr  error
-	v2Detail    map[string]any
-	lastRenewV2 godaddy.RenewV2Request
+	v2DetailErr       error
+	v2NSErr           error
+	v2RenewErr        error
+	v2Detail          map[string]any
+	lastRenewV2       godaddy.RenewV2Request
+	requireCustomerID string
 }
 
 func (f *fakeV2Client) ResolveCustomerID(ctx context.Context, shopperID string) (string, error) {
@@ -25,6 +26,9 @@ func (f *fakeV2Client) ResolveCustomerID(ctx context.Context, shopperID string) 
 func (f *fakeV2Client) DomainDetailV2(ctx context.Context, customerID, domain string, includes []string) (map[string]any, error) {
 	if f.v2DetailErr != nil {
 		return nil, f.v2DetailErr
+	}
+	if f.requireCustomerID != "" && customerID != f.requireCustomerID {
+		return nil, errors.New("customer mismatch")
 	}
 	if f.v2Detail != nil {
 		return f.v2Detail, nil
@@ -38,6 +42,9 @@ func (f *fakeV2Client) DomainDetailV1(ctx context.Context, domain string) (map[s
 
 func (f *fakeV2Client) RenewV2(ctx context.Context, customerID, domain string, req godaddy.RenewV2Request, idempotencyKey string) (godaddy.RenewResult, error) {
 	f.lastRenewV2 = req
+	if f.requireCustomerID != "" && customerID != f.requireCustomerID {
+		return godaddy.RenewResult{}, errors.New("customer mismatch")
+	}
 	if f.v2RenewErr != nil {
 		return godaddy.RenewResult{}, f.v2RenewErr
 	}
@@ -171,5 +178,31 @@ func TestRenewFallsBackToV1WhenV2PayloadUnavailable(t *testing.T) {
 	}
 	if out["api_version"] != "v1" {
 		t.Fatalf("expected v1 fallback, got %v", out["api_version"])
+	}
+}
+
+func TestRenewV2FallsBackToShopperIDCustomerCandidate(t *testing.T) {
+	rt := makeRuntime(t)
+	rt.Cfg.CustomerID = "cust-uuid"
+	rt.Cfg.ShopperID = "660323812"
+	fc := &fakeV2Client{
+		requireCustomerID: "660323812",
+		v2Detail: map[string]any{
+			"domain":    "example.com",
+			"expiresAt": "2026-05-27T15:01:38.000Z",
+			"renewal": map[string]any{
+				"price":    float64(10990000),
+				"currency": "USD",
+			},
+		},
+	}
+	svc := New(rt, fc)
+
+	out, err := svc.Renew(context.Background(), "example.com", 1, false, true)
+	if err != nil {
+		t.Fatalf("renew via shopper-id fallback: %v", err)
+	}
+	if out["api_version"] != "v2" {
+		t.Fatalf("expected v2 renew path, got %v", out["api_version"])
 	}
 }
