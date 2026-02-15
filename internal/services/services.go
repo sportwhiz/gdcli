@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +34,7 @@ type v2RouterClient interface {
 	ResolveCustomerID(ctx context.Context, shopperID string) (string, error)
 	DomainDetailV2(ctx context.Context, customerID, domain string, includes []string) (map[string]any, error)
 	DomainDetailV1(ctx context.Context, domain string) (map[string]any, error)
-	RenewV2(ctx context.Context, customerID, domain string, years int, idempotencyKey string) (godaddy.RenewResult, error)
+	RenewV2(ctx context.Context, customerID, domain string, req godaddy.RenewV2Request, idempotencyKey string) (godaddy.RenewResult, error)
 	SetNameserversV2(ctx context.Context, customerID, domain string, nameservers []string) error
 	V2Get(ctx context.Context, path string, query url.Values, out any) error
 	V2Post(ctx context.Context, path string, body any, out any, idempotencyKey string) error
@@ -59,6 +61,86 @@ func doV2ThenV1[T any](useV2 bool, runV2 func() (T, error), runV1 func() (T, err
 		return v1, false, nil
 	}
 	return zero, false, err
+}
+
+func renewPriceMicros(v any) (int64, error) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), nil
+	case int64:
+		return n, nil
+	case float64:
+		if math.Mod(n, 1.0) != 0 {
+			return 0, fmt.Errorf("renewal price must be integer micros")
+		}
+		return int64(n), nil
+	case float32:
+		f := float64(n)
+		if math.Mod(f, 1.0) != 0 {
+			return 0, fmt.Errorf("renewal price must be integer micros")
+		}
+		return int64(f), nil
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i, nil
+		}
+		return 0, fmt.Errorf("renewal price is not an integer")
+	case string:
+		i, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("renewal price is not an integer")
+		}
+		return i, nil
+	default:
+		return 0, fmt.Errorf("unsupported renewal price type %T", v)
+	}
+}
+
+func (s *Service) buildRenewV2Request(ctx context.Context, v2c v2RouterClient, domain string, years int) (godaddy.RenewV2Request, error) {
+	detail, err := v2c.DomainDetailV2(ctx, s.RT.Cfg.CustomerID, domain, nil)
+	if err != nil {
+		return godaddy.RenewV2Request{}, err
+	}
+	expires, _ := detail["expiresAt"].(string)
+	if strings.TrimSpace(expires) == "" {
+		return godaddy.RenewV2Request{}, &apperr.AppError{
+			Code:    apperr.CodeProvider,
+			Message: "v2 renew requires domain expiration from domain detail response",
+		}
+	}
+	renewal, ok := detail["renewal"].(map[string]any)
+	if !ok {
+		return godaddy.RenewV2Request{}, &apperr.AppError{
+			Code:    apperr.CodeProvider,
+			Message: "v2 renew requires renewal pricing from domain detail response",
+		}
+	}
+	priceMicros, err := renewPriceMicros(renewal["price"])
+	if err != nil || priceMicros <= 0 {
+		return godaddy.RenewV2Request{}, &apperr.AppError{
+			Code:    apperr.CodeProvider,
+			Message: "v2 renew requires valid renewal price in micro-units from domain detail response",
+			Cause:   err,
+		}
+	}
+	currency, _ := renewal["currency"].(string)
+	if strings.TrimSpace(currency) == "" {
+		currency = "USD"
+	}
+	agreedBy := strings.TrimSpace(os.Getenv("GDCLI_AGREED_BY_IP"))
+	if agreedBy == "" {
+		agreedBy = "127.0.0.1"
+	}
+	return godaddy.RenewV2Request{
+		Expires: expires,
+		Period:  years,
+		Consent: godaddy.RenewV2Consent{
+			Price:    priceMicros,
+			Currency: strings.ToUpper(currency),
+			AgreedBy: agreedBy,
+			AgreedAt: time.Now().UTC().Format(time.RFC3339),
+		},
+	}, nil
 }
 
 func (s *Service) v2Client() (v2RouterClient, bool) {
@@ -466,6 +548,7 @@ func (s *Service) Renew(ctx context.Context, domain string, years int, dryRun bo
 		return map[string]any{"domain": domain, "already_renewed": true, "price": priceEstimate, "currency": currency}, nil
 	}
 	var rr godaddy.RenewResult
+	usedV2 := false
 	err = rate.Retry(ctx, 3, func() (bool, error) {
 		if err := s.RT.Limiter.Wait(ctx); err != nil {
 			return false, err
@@ -473,18 +556,24 @@ func (s *Service) Renew(ctx context.Context, domain string, years int, dryRun bo
 		useV2 := canUseV2(s.RT.Cfg.CustomerID)
 		var r godaddy.RenewResult
 		if v2c, ok := s.v2Client(); ok && useV2 {
-			out, _, callErr := doV2ThenV1(
+			out, used, callErr := doV2ThenV1(
 				true,
 				func() (godaddy.RenewResult, error) {
-					return v2c.RenewV2(ctx, s.RT.Cfg.CustomerID, domain, years, opKey)
+					req, reqErr := s.buildRenewV2Request(ctx, v2c, domain, years)
+					if reqErr != nil {
+						return godaddy.RenewResult{}, reqErr
+					}
+					return v2c.RenewV2(ctx, s.RT.Cfg.CustomerID, domain, req, opKey)
 				},
 				func() (godaddy.RenewResult, error) {
 					return s.Client.Renew(ctx, domain, years, opKey)
 				},
 			)
+			usedV2 = used
 			r, err = out, callErr
 		} else {
 			r, err = s.Client.Renew(ctx, domain, years, opKey)
+			usedV2 = false
 		}
 		rr = r
 		if err == nil {
@@ -506,7 +595,11 @@ func (s *Service) Renew(ctx context.Context, domain string, years int, dryRun bo
 		rr.Currency = currency
 	}
 	s.appendOperationWithWarning(store.Operation{OperationID: opKey, Type: "renew", Domain: domain, Amount: rr.Price, Currency: rr.Currency, CreatedAt: time.Now(), Status: "succeeded"})
-	return map[string]any{"domain": domain, "years": years, "dry_run": false, "price": rr.Price, "currency": rr.Currency, "order_id": rr.OrderID}, nil
+	apiVersion := "v1"
+	if usedV2 {
+		apiVersion = "v2"
+	}
+	return map[string]any{"domain": domain, "years": years, "dry_run": false, "price": rr.Price, "currency": rr.Currency, "order_id": rr.OrderID, "api_version": apiVersion}, nil
 }
 
 func (s *Service) ListPortfolio(ctx context.Context, expiringIn int, tld, contains string) ([]godaddy.PortfolioDomain, error) {
