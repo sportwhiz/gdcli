@@ -83,6 +83,31 @@ func TestRunAccountValidationLimit(t *testing.T) {
 	}
 }
 
+func TestRunAccountIdentitySetAndShow(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+
+	rt, out := testRuntime(t, srv.URL, true, false)
+	if err := runAccount(rt, []string{"identity", "set", "--shopper-id", "660323812", "--customer-id", "cust-123"}); err != nil {
+		t.Fatalf("account identity set: %v", err)
+	}
+	out.Reset()
+	if err := runAccount(rt, []string{"identity", "show"}); err != nil {
+		t.Fatalf("account identity show: %v", err)
+	}
+	var env map[string]any
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	result, ok := env["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing result")
+	}
+	if result["shopper_id"] != "660323812" || result["customer_id"] != "cust-123" {
+		t.Fatalf("unexpected identity values: %+v", result)
+	}
+}
+
 func testRuntime(t *testing.T, baseURL string, jsonMode, ndjsonMode bool) (*app.Runtime, *bytes.Buffer) {
 	t.Helper()
 	home := t.TempDir()

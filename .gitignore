@@ -1,0 +1,19 @@
+# Binaries and build artifacts
+gdcli
+dist/
+build/
+bin/
+
+# Local environment and secrets
+.env
+.env.*
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Go test artifacts
+*.test
+*.out
+coverage.out

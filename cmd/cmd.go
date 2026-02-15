@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -92,7 +93,7 @@ func parseGlobalFlags(args []string) (globalFlags, []string, error) {
 func runInit(rt *app.Runtime, args []string) error {
 	if len(args) > 0 && isHelpToken(args[0]) {
 		return emitSuccess(rt, "init help", map[string]any{
-			"usage": "gdcli init [--api-environment prod|ote] [--max-price N] [--max-daily-spend N] [--max-domains-per-day N] [--enable-auto-purchase --ack \"I UNDERSTAND PURCHASES ARE FINAL\"] [--store-keychain --api-key KEY --api-secret SECRET] [--verify]",
+			"usage": "gdcli init [--api-environment prod|ote] [--max-price N] [--max-daily-spend N] [--max-domains-per-day N] [--shopper-id ID --resolve-customer-id] [--enable-auto-purchase --ack \"I UNDERSTAND PURCHASES ARE FINAL\"] [--store-keychain --api-key KEY --api-secret SECRET] [--verify]",
 		})
 	}
 
@@ -138,6 +139,10 @@ func runInit(rt *app.Runtime, args []string) error {
 		rt.Cfg.MaxDomainsPerDay = n
 		changed["max_domains_per_day"] = n
 	}
+	if v := strings.TrimSpace(flags["shopper-id"]); v != "" {
+		rt.Cfg.ShopperID = v
+		changed["shopper_id"] = v
+	}
 
 	if hasBoolFlag(args, "enable-auto-purchase") {
 		ack := strings.TrimSpace(flags["ack"])
@@ -157,6 +162,35 @@ func runInit(rt *app.Runtime, args []string) error {
 			emitError(rt, "init", ae)
 			return ae
 		}
+	}
+
+	customerResolved := false
+	if hasBoolFlag(args, "resolve-customer-id") {
+		shopperID := strings.TrimSpace(rt.Cfg.ShopperID)
+		if shopperID == "" {
+			err := &apperr.AppError{Code: apperr.CodeValidation, Message: "--resolve-customer-id requires --shopper-id or existing shopper_id in config"}
+			emitError(rt, "init", err)
+			return err
+		}
+		svc, err := newService(rt)
+		if err != nil {
+			emitError(rt, "init", err)
+			return err
+		}
+		customerID, err := svc.ResolveAndStoreCustomerID(rt.Ctx, shopperID)
+		if err != nil {
+			emitError(rt, "init", err)
+			return err
+		}
+		if err := config.Save(rt.Cfg); err != nil {
+			ae := &apperr.AppError{Code: apperr.CodeInternal, Message: "failed saving config", Cause: err}
+			emitError(rt, "init", ae)
+			return ae
+		}
+		changed["customer_id"] = customerID
+		changed["customer_id_source"] = rt.Cfg.CustomerIDSource
+		changed["customer_id_resolved_at"] = rt.Cfg.CustomerIDResolved
+		customerResolved = true
 	}
 
 	keychainStored := false
@@ -199,6 +233,7 @@ func runInit(rt *app.Runtime, args []string) error {
 		"config_path":       configPath,
 		"keychain_stored":   keychainStored,
 		"verified":          verified,
+		"customer_resolved": customerResolved,
 		"verification_info": verifyResult,
 		"next_steps": []string{
 			"set GODADDY_API_KEY and GODADDY_API_SECRET (or use --store-keychain on macOS)",
@@ -212,7 +247,7 @@ func runInit(rt *app.Runtime, args []string) error {
 func runDomains(rt *app.Runtime, args []string) error {
 	if len(args) == 0 || isHelpToken(args[0]) {
 		return emitSuccess(rt, "domains help", map[string]any{
-			"subcommands": []string{"suggest", "avail", "avail-bulk", "purchase", "renew", "renew-bulk", "list"},
+			"subcommands": []string{"suggest", "avail", "avail-bulk", "purchase", "renew", "renew-bulk", "list", "portfolio", "detail", "actions", "usage", "maintenances", "notifications", "contacts", "nameservers", "dnssec", "forwarding", "privacy-forwarding", "register", "transfer", "redeem"},
 		})
 	}
 	if len(args) == 0 {
@@ -397,6 +432,546 @@ func runDomains(rt *app.Runtime, args []string) error {
 			return err
 		}
 		return emitSuccess(rt, "domains list", map[string]any{"domains": res})
+	case "portfolio":
+		flags := parseKVFlags(rest)
+		expiring := parseIntDefault(flags["expiring-in"], 0)
+		tld := flags["tld"]
+		contains := flags["contains"]
+		concurrency := parseIntDefault(flags["concurrency"], 5)
+		res, err := svc.PortfolioWithNameservers(rt.Ctx, expiring, tld, contains, concurrency)
+		if rt.NDJSON {
+			rows := make([]any, 0, len(res))
+			for _, item := range res {
+				rows = append(rows, item)
+			}
+			if emitErr := emitSuccess(rt, "domains portfolio", rows); emitErr != nil {
+				return emitErr
+			}
+		} else {
+			if emitErr := emitSuccess(rt, "domains portfolio", map[string]any{"domains": res}); emitErr != nil {
+				return emitErr
+			}
+		}
+		if err != nil {
+			return err
+		}
+		return nil
+	case "detail":
+		if len(rest) == 0 {
+			err := usageError("domains detail <domain> [--includes a,b,c]")
+			emitError(rt, "domains detail", err)
+			return err
+		}
+		flags := parseKVFlags(rest[1:])
+		includes := splitCSV(flags["includes"])
+		res, err := svc.DomainDetail(rt.Ctx, rest[0], includes)
+		if err != nil {
+			emitError(rt, "domains detail", err)
+			return err
+		}
+		return emitSuccess(rt, "domains detail", res)
+	case "actions":
+		if len(rest) == 0 {
+			err := usageError("domains actions <domain> [--type <actionType>]")
+			emitError(rt, "domains actions", err)
+			return err
+		}
+		flags := parseKVFlags(rest[1:])
+		actionType := strings.TrimSpace(flags["type"])
+		base, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/" + rest[0] + "/actions")
+		if err != nil {
+			emitError(rt, "domains actions", err)
+			return err
+		}
+		path := base
+		if actionType != "" {
+			path = base + "/" + actionType
+		}
+		res, err := svc.V2Get(rt.Ctx, path, nil)
+		if err != nil {
+			emitError(rt, "domains actions", err)
+			return err
+		}
+		return emitSuccess(rt, "domains actions", res)
+	case "change-of-registrant":
+		if len(rest) == 0 {
+			err := usageError("domains change-of-registrant <domain>")
+			emitError(rt, "domains change-of-registrant", err)
+			return err
+		}
+		path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/" + rest[0] + "/changeOfRegistrant")
+		if err != nil {
+			emitError(rt, "domains change-of-registrant", err)
+			return err
+		}
+		res, err := svc.V2Get(rt.Ctx, path, nil)
+		if err != nil {
+			emitError(rt, "domains change-of-registrant", err)
+			return err
+		}
+		return emitSuccess(rt, "domains change-of-registrant", res)
+	case "auth-code":
+		if len(rest) < 2 || rest[0] != "regenerate" {
+			err := usageError("domains auth-code regenerate <domain> [--apply]")
+			emitError(rt, "domains auth-code", err)
+			return err
+		}
+		domain := rest[1]
+		if !hasBoolFlag(rest[2:], "apply") {
+			return emitSuccess(rt, "domains auth-code regenerate", map[string]any{"dry_run": true, "domain": domain})
+		}
+		path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/" + domain + "/regenerateAuthCode")
+		if err != nil {
+			emitError(rt, "domains auth-code regenerate", err)
+			return err
+		}
+		res, err := svc.V2Apply(rt.Ctx, "POST", path, map[string]any{}, "")
+		if err != nil {
+			emitError(rt, "domains auth-code regenerate", err)
+			return err
+		}
+		return emitSuccess(rt, "domains auth-code regenerate", res)
+	case "usage":
+		if len(rest) == 0 {
+			err := usageError("domains usage <yyyymm>")
+			emitError(rt, "domains usage", err)
+			return err
+		}
+		path := "/v2/domains/usage/" + rest[0]
+		res, err := svc.V2Get(rt.Ctx, path, nil)
+		if err != nil {
+			emitError(rt, "domains usage", err)
+			return err
+		}
+		return emitSuccess(rt, "domains usage", res)
+	case "maintenances":
+		flags := parseKVFlags(rest)
+		if id := strings.TrimSpace(flags["id"]); id != "" {
+			res, err := svc.V2Get(rt.Ctx, "/v2/domains/maintenances/"+id, nil)
+			if err != nil {
+				emitError(rt, "domains maintenances", err)
+				return err
+			}
+			return emitSuccess(rt, "domains maintenances", res)
+		}
+		res, err := svc.V2Get(rt.Ctx, "/v2/domains/maintenances", nil)
+		if err != nil {
+			emitError(rt, "domains maintenances", err)
+			return err
+		}
+		return emitSuccess(rt, "domains maintenances", res)
+	case "notifications":
+		if len(rest) == 0 {
+			err := usageError("domains notifications <next|optin|schema|ack>")
+			emitError(rt, "domains notifications", err)
+			return err
+		}
+		switch rest[0] {
+		case "next":
+			path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/notifications")
+			if err != nil {
+				emitError(rt, "domains notifications next", err)
+				return err
+			}
+			res, err := svc.V2Get(rt.Ctx, path, nil)
+			if err != nil {
+				emitError(rt, "domains notifications next", err)
+				return err
+			}
+			return emitSuccess(rt, "domains notifications next", res)
+		case "optin":
+			if len(rest) < 2 {
+				err := usageError("domains notifications optin <list|set> [--types a,b,c] [--apply]")
+				emitError(rt, "domains notifications optin", err)
+				return err
+			}
+			path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/notifications/optIn")
+			if err != nil {
+				emitError(rt, "domains notifications optin", err)
+				return err
+			}
+			switch rest[1] {
+			case "list":
+				res, err := svc.V2Get(rt.Ctx, path, nil)
+				if err != nil {
+					emitError(rt, "domains notifications optin list", err)
+					return err
+				}
+				return emitSuccess(rt, "domains notifications optin list", res)
+			case "set":
+				flags := parseKVFlags(rest[2:])
+				types := splitCSV(flags["types"])
+				if !hasBoolFlag(rest[2:], "apply") {
+					return emitSuccess(rt, "domains notifications optin set", map[string]any{"dry_run": true, "would_set_notification_types": types})
+				}
+				res, err := svc.V2Apply(rt.Ctx, "PUT", path, map[string]any{"notificationTypes": types}, "")
+				if err != nil {
+					emitError(rt, "domains notifications optin set", err)
+					return err
+				}
+				return emitSuccess(rt, "domains notifications optin set", res)
+			}
+		case "schema":
+			if len(rest) < 2 {
+				err := usageError("domains notifications schema <type>")
+				emitError(rt, "domains notifications schema", err)
+				return err
+			}
+			path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/notifications/schemas/" + rest[1])
+			if err != nil {
+				emitError(rt, "domains notifications schema", err)
+				return err
+			}
+			res, err := svc.V2Get(rt.Ctx, path, nil)
+			if err != nil {
+				emitError(rt, "domains notifications schema", err)
+				return err
+			}
+			return emitSuccess(rt, "domains notifications schema", res)
+		case "ack":
+			if len(rest) < 2 {
+				err := usageError("domains notifications ack <notificationId> [--apply]")
+				emitError(rt, "domains notifications ack", err)
+				return err
+			}
+			path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/notifications/" + rest[1] + "/acknowledge")
+			if err != nil {
+				emitError(rt, "domains notifications ack", err)
+				return err
+			}
+			if !hasBoolFlag(rest[2:], "apply") {
+				return emitSuccess(rt, "domains notifications ack", map[string]any{"dry_run": true, "would_acknowledge_notification_id": rest[1]})
+			}
+			res, err := svc.V2Apply(rt.Ctx, "POST", path, map[string]any{}, "")
+			if err != nil {
+				emitError(rt, "domains notifications ack", err)
+				return err
+			}
+			return emitSuccess(rt, "domains notifications ack", res)
+		}
+		err := usageError("domains notifications <next|optin|schema|ack>")
+		emitError(rt, "domains notifications", err)
+		return err
+	case "contacts":
+		if len(rest) < 2 || rest[0] != "set" {
+			err := usageError("domains contacts set <domain> --body-json '<json>' [--apply]")
+			emitError(rt, "domains contacts", err)
+			return err
+		}
+		domain := rest[1]
+		flags := parseKVFlags(rest[2:])
+		var body map[string]any
+		if raw := strings.TrimSpace(flags["body-json"]); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &body); err != nil {
+				ae := &apperr.AppError{Code: apperr.CodeValidation, Message: "invalid --body-json", Cause: err}
+				emitError(rt, "domains contacts set", ae)
+				return ae
+			}
+		}
+		if !hasBoolFlag(rest[2:], "apply") {
+			return emitSuccess(rt, "domains contacts set", map[string]any{"dry_run": true, "domain": domain, "body": body})
+		}
+		path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/" + domain + "/contacts")
+		if err != nil {
+			emitError(rt, "domains contacts set", err)
+			return err
+		}
+		res, err := svc.V2Apply(rt.Ctx, "PATCH", path, body, "")
+		if err != nil {
+			emitError(rt, "domains contacts set", err)
+			return err
+		}
+		return emitSuccess(rt, "domains contacts set", res)
+	case "nameservers":
+		if len(rest) < 2 || rest[0] != "set" {
+			err := usageError("domains nameservers set <domain> --nameservers ns1,ns2 [--apply]")
+			emitError(rt, "domains nameservers", err)
+			return err
+		}
+		domain := rest[1]
+		flags := parseKVFlags(rest[2:])
+		ns := splitCSV(flags["nameservers"])
+		if len(ns) == 0 {
+			err := &apperr.AppError{Code: apperr.CodeValidation, Message: "--nameservers is required"}
+			emitError(rt, "domains nameservers set", err)
+			return err
+		}
+		if !hasBoolFlag(rest[2:], "apply") {
+			return emitSuccess(rt, "domains nameservers set", map[string]any{"dry_run": true, "domain": domain, "nameservers": ns})
+		}
+		apiVersion, err := svc.SetNameserversSmart(rt.Ctx, domain, ns)
+		if err != nil {
+			emitError(rt, "domains nameservers set", err)
+			return err
+		}
+		return emitSuccess(rt, "domains nameservers set", map[string]any{"domain": domain, "nameservers": ns, "api_version": apiVersion, "applied": true})
+	case "dnssec":
+		if len(rest) < 2 || rest[0] != "add" {
+			err := usageError("domains dnssec add <domain> --body-json '<json>' [--apply]")
+			emitError(rt, "domains dnssec", err)
+			return err
+		}
+		domain := rest[1]
+		flags := parseKVFlags(rest[2:])
+		var body map[string]any
+		if raw := strings.TrimSpace(flags["body-json"]); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &body); err != nil {
+				ae := &apperr.AppError{Code: apperr.CodeValidation, Message: "invalid --body-json", Cause: err}
+				emitError(rt, "domains dnssec add", ae)
+				return ae
+			}
+		}
+		if !hasBoolFlag(rest[2:], "apply") {
+			return emitSuccess(rt, "domains dnssec add", map[string]any{"dry_run": true, "domain": domain, "body": body})
+		}
+		path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/" + domain + "/dnssecRecords")
+		if err != nil {
+			emitError(rt, "domains dnssec add", err)
+			return err
+		}
+		res, err := svc.V2Apply(rt.Ctx, "PATCH", path, body, "")
+		if err != nil {
+			emitError(rt, "domains dnssec add", err)
+			return err
+		}
+		return emitSuccess(rt, "domains dnssec add", res)
+	case "forwarding":
+		if len(rest) < 2 {
+			err := usageError("domains forwarding <get|create|update> <fqdn> [--body-json '<json>'] [--apply]")
+			emitError(rt, "domains forwarding", err)
+			return err
+		}
+		action := rest[0]
+		fqdn := rest[1]
+		path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/forwards/" + fqdn)
+		if err != nil {
+			emitError(rt, "domains forwarding", err)
+			return err
+		}
+		flags := parseKVFlags(rest[2:])
+		switch action {
+		case "get":
+			res, err := svc.V2Get(rt.Ctx, path, nil)
+			if err != nil {
+				emitError(rt, "domains forwarding get", err)
+				return err
+			}
+			return emitSuccess(rt, "domains forwarding get", res)
+		case "create", "update":
+			var body map[string]any
+			if raw := strings.TrimSpace(flags["body-json"]); raw != "" {
+				if err := json.Unmarshal([]byte(raw), &body); err != nil {
+					ae := &apperr.AppError{Code: apperr.CodeValidation, Message: "invalid --body-json", Cause: err}
+					emitError(rt, "domains forwarding "+action, ae)
+					return ae
+				}
+			}
+			if !hasBoolFlag(rest[2:], "apply") {
+				return emitSuccess(rt, "domains forwarding "+action, map[string]any{"dry_run": true, "fqdn": fqdn, "body": body})
+			}
+			method := "POST"
+			if action == "update" {
+				method = "PUT"
+			}
+			res, err := svc.V2Apply(rt.Ctx, method, path, body, "")
+			if err != nil {
+				emitError(rt, "domains forwarding "+action, err)
+				return err
+			}
+			return emitSuccess(rt, "domains forwarding "+action, res)
+		}
+		err = usageError("domains forwarding <get|create|update> <fqdn>")
+		emitError(rt, "domains forwarding", err)
+		return err
+	case "privacy-forwarding":
+		if len(rest) < 2 {
+			err := usageError("domains privacy-forwarding <get|set> <domain> [--body-json '<json>'] [--apply]")
+			emitError(rt, "domains privacy-forwarding", err)
+			return err
+		}
+		action := rest[0]
+		domain := rest[1]
+		path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/" + domain + "/privacy/forwarding")
+		if err != nil {
+			emitError(rt, "domains privacy-forwarding", err)
+			return err
+		}
+		flags := parseKVFlags(rest[2:])
+		if action == "get" {
+			res, err := svc.V2Get(rt.Ctx, path, nil)
+			if err != nil {
+				emitError(rt, "domains privacy-forwarding get", err)
+				return err
+			}
+			return emitSuccess(rt, "domains privacy-forwarding get", res)
+		}
+		if action == "set" {
+			var body map[string]any
+			if raw := strings.TrimSpace(flags["body-json"]); raw != "" {
+				if err := json.Unmarshal([]byte(raw), &body); err != nil {
+					ae := &apperr.AppError{Code: apperr.CodeValidation, Message: "invalid --body-json", Cause: err}
+					emitError(rt, "domains privacy-forwarding set", ae)
+					return ae
+				}
+			}
+			if !hasBoolFlag(rest[2:], "apply") {
+				return emitSuccess(rt, "domains privacy-forwarding set", map[string]any{"dry_run": true, "domain": domain, "body": body})
+			}
+			res, err := svc.V2Apply(rt.Ctx, "PATCH", path, body, "")
+			if err != nil {
+				emitError(rt, "domains privacy-forwarding set", err)
+				return err
+			}
+			return emitSuccess(rt, "domains privacy-forwarding set", res)
+		}
+		err = usageError("domains privacy-forwarding <get|set> <domain>")
+		emitError(rt, "domains privacy-forwarding", err)
+		return err
+	case "register":
+		if len(rest) == 0 {
+			err := usageError("domains register <schema|validate|purchase> ...")
+			emitError(rt, "domains register", err)
+			return err
+		}
+		switch rest[0] {
+		case "schema":
+			if len(rest) < 2 {
+				err := usageError("domains register schema <tld>")
+				emitError(rt, "domains register schema", err)
+				return err
+			}
+			path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/register/schema/" + rest[1])
+			if err != nil {
+				emitError(rt, "domains register schema", err)
+				return err
+			}
+			res, err := svc.V2Get(rt.Ctx, path, nil)
+			if err != nil {
+				emitError(rt, "domains register schema", err)
+				return err
+			}
+			return emitSuccess(rt, "domains register schema", res)
+		case "validate", "purchase":
+			flags := parseKVFlags(rest[1:])
+			var body map[string]any
+			if raw := strings.TrimSpace(flags["body-json"]); raw != "" {
+				if err := json.Unmarshal([]byte(raw), &body); err != nil {
+					ae := &apperr.AppError{Code: apperr.CodeValidation, Message: "invalid --body-json", Cause: err}
+					emitError(rt, "domains register "+rest[0], ae)
+					return ae
+				}
+			}
+			if !hasBoolFlag(rest[1:], "apply") {
+				return emitSuccess(rt, "domains register "+rest[0], map[string]any{"dry_run": true, "body": body})
+			}
+			suffix := "register/validate"
+			if rest[0] == "purchase" {
+				app.MaybeWarnProdFinancial(rt, "domains register purchase")
+				suffix = "register"
+			}
+			path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/" + suffix)
+			if err != nil {
+				emitError(rt, "domains register "+rest[0], err)
+				return err
+			}
+			res, err := svc.V2Apply(rt.Ctx, "POST", path, body, "")
+			if err != nil {
+				emitError(rt, "domains register "+rest[0], err)
+				return err
+			}
+			return emitSuccess(rt, "domains register "+rest[0], res)
+		}
+		err := usageError("domains register <schema|validate|purchase>")
+		emitError(rt, "domains register", err)
+		return err
+	case "transfer":
+		if len(rest) < 2 {
+			err := usageError("domains transfer <status|validate|start|in-accept|in-cancel|in-restart|in-retry|out|out-accept|out-reject> <domain> [--body-json '<json>'] [--apply]")
+			emitError(rt, "domains transfer", err)
+			return err
+		}
+		action := rest[0]
+		domain := rest[1]
+		flags := parseKVFlags(rest[2:])
+		suffix := map[string]string{
+			"status":     "transfer",
+			"validate":   "transfer/validate",
+			"start":      "transfer",
+			"in-accept":  "transferInAccept",
+			"in-cancel":  "transferInCancel",
+			"in-restart": "transferInRestart",
+			"in-retry":   "transferInRetry",
+			"out":        "transferOut",
+			"out-accept": "transferOutAccept",
+			"out-reject": "transferOutReject",
+		}[action]
+		if suffix == "" {
+			err := usageError("domains transfer <status|validate|start|in-accept|in-cancel|in-restart|in-retry|out|out-accept|out-reject> <domain>")
+			emitError(rt, "domains transfer", err)
+			return err
+		}
+		path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/" + domain + "/" + suffix)
+		if err != nil {
+			emitError(rt, "domains transfer", err)
+			return err
+		}
+		if action == "status" {
+			res, err := svc.V2Get(rt.Ctx, path, nil)
+			if err != nil {
+				emitError(rt, "domains transfer status", err)
+				return err
+			}
+			return emitSuccess(rt, "domains transfer status", res)
+		}
+		var body map[string]any
+		if raw := strings.TrimSpace(flags["body-json"]); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &body); err != nil {
+				ae := &apperr.AppError{Code: apperr.CodeValidation, Message: "invalid --body-json", Cause: err}
+				emitError(rt, "domains transfer "+action, ae)
+				return ae
+			}
+		}
+		if !hasBoolFlag(rest[2:], "apply") {
+			return emitSuccess(rt, "domains transfer "+action, map[string]any{"dry_run": true, "domain": domain, "body": body})
+		}
+		app.MaybeWarnProdFinancial(rt, "domains transfer "+action)
+		res, err := svc.V2Apply(rt.Ctx, "POST", path, body, "")
+		if err != nil {
+			emitError(rt, "domains transfer "+action, err)
+			return err
+		}
+		return emitSuccess(rt, "domains transfer "+action, res)
+	case "redeem":
+		if len(rest) < 1 {
+			err := usageError("domains redeem <domain> [--body-json '<json>'] [--apply]")
+			emitError(rt, "domains redeem", err)
+			return err
+		}
+		domain := rest[0]
+		flags := parseKVFlags(rest[1:])
+		var body map[string]any
+		if raw := strings.TrimSpace(flags["body-json"]); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &body); err != nil {
+				ae := &apperr.AppError{Code: apperr.CodeValidation, Message: "invalid --body-json", Cause: err}
+				emitError(rt, "domains redeem", ae)
+				return ae
+			}
+		}
+		if !hasBoolFlag(rest[1:], "apply") {
+			return emitSuccess(rt, "domains redeem", map[string]any{"dry_run": true, "domain": domain, "body": body})
+		}
+		app.MaybeWarnProdFinancial(rt, "domains redeem")
+		path, err := svc.V2PathCustomer("/v2/customers/{customerId}/domains/" + domain + "/redeem")
+		if err != nil {
+			emitError(rt, "domains redeem", err)
+			return err
+		}
+		res, err := svc.V2Apply(rt.Ctx, "POST", path, body, "")
+		if err != nil {
+			emitError(rt, "domains redeem", err)
+			return err
+		}
+		return emitSuccess(rt, "domains redeem", res)
 	default:
 		err := usageError("unknown domains subcommand: " + sub)
 		emitError(rt, "domains", err)
@@ -474,8 +1049,11 @@ func runDNS(rt *app.Runtime, args []string) error {
 func runAccount(rt *app.Runtime, args []string) error {
 	if len(args) == 0 || isHelpToken(args[0]) {
 		return emitSuccess(rt, "account help", map[string]any{
-			"subcommands": []string{"orders list", "subscriptions list"},
+			"subcommands": []string{"orders list", "subscriptions list", "identity show", "identity set", "identity resolve"},
 		})
+	}
+	if args[0] == "identity" {
+		return runAccountIdentity(rt, args[1:])
 	}
 	svc, err := newService(rt)
 	if err != nil {
@@ -559,6 +1137,81 @@ func runAccount(rt *app.Runtime, args []string) error {
 	}
 }
 
+func runAccountIdentity(rt *app.Runtime, args []string) error {
+	if len(args) == 0 || isHelpToken(args[0]) {
+		return emitSuccess(rt, "account identity help", map[string]any{
+			"subcommands": []string{"show", "set", "resolve"},
+		})
+	}
+	switch args[0] {
+	case "show":
+		svc, err := newService(rt)
+		if err != nil {
+			emitError(rt, "account identity show", err)
+			return err
+		}
+		return emitSuccess(rt, "account identity show", svc.IdentityShow())
+	case "set":
+		flags := parseKVFlags(args[1:])
+		shopperID := strings.TrimSpace(flags["shopper-id"])
+		customerID := strings.TrimSpace(flags["customer-id"])
+		if shopperID == "" && customerID == "" {
+			err := usageError("account identity set --shopper-id <id> [--customer-id <id>]")
+			emitError(rt, "account identity set", err)
+			return err
+		}
+		if shopperID != "" {
+			rt.Cfg.ShopperID = shopperID
+		}
+		if customerID != "" {
+			rt.Cfg.CustomerID = customerID
+			rt.Cfg.CustomerIDSource = "manual"
+			rt.Cfg.CustomerIDResolved = ""
+		}
+		if err := config.Save(rt.Cfg); err != nil {
+			ae := &apperr.AppError{Code: apperr.CodeInternal, Message: "failed saving config", Cause: err}
+			emitError(rt, "account identity set", ae)
+			return ae
+		}
+		return emitSuccess(rt, "account identity set", map[string]any{
+			"shopper_id":  rt.Cfg.ShopperID,
+			"customer_id": rt.Cfg.CustomerID,
+		})
+	case "resolve":
+		shopperID := strings.TrimSpace(rt.Cfg.ShopperID)
+		if shopperID == "" {
+			err := &apperr.AppError{Code: apperr.CodeValidation, Message: "shopper_id is not configured; set it first with account identity set --shopper-id"}
+			emitError(rt, "account identity resolve", err)
+			return err
+		}
+		svc, err := newService(rt)
+		if err != nil {
+			emitError(rt, "account identity resolve", err)
+			return err
+		}
+		customerID, err := svc.ResolveAndStoreCustomerID(rt.Ctx, shopperID)
+		if err != nil {
+			emitError(rt, "account identity resolve", err)
+			return err
+		}
+		if err := config.Save(rt.Cfg); err != nil {
+			ae := &apperr.AppError{Code: apperr.CodeInternal, Message: "failed saving config", Cause: err}
+			emitError(rt, "account identity resolve", ae)
+			return ae
+		}
+		return emitSuccess(rt, "account identity resolve", map[string]any{
+			"shopper_id":              rt.Cfg.ShopperID,
+			"customer_id":             customerID,
+			"customer_id_source":      rt.Cfg.CustomerIDSource,
+			"customer_id_resolved_at": rt.Cfg.CustomerIDResolved,
+		})
+	default:
+		err := usageError("account identity <show|set|resolve>")
+		emitError(rt, "account identity", err)
+		return err
+	}
+}
+
 func runSettings(rt *app.Runtime, args []string) error {
 	if len(args) == 0 || isHelpToken(args[0]) {
 		return emitSuccess(rt, "settings help", map[string]any{
@@ -635,6 +1288,10 @@ func runSettings(rt *app.Runtime, args []string) error {
 	case "show":
 		redacted := map[string]any{
 			"api_environment":             rt.Cfg.APIEnvironment,
+			"shopper_id":                  rt.Cfg.ShopperID,
+			"customer_id":                 rt.Cfg.CustomerID,
+			"customer_id_resolved_at":     rt.Cfg.CustomerIDResolved,
+			"customer_id_source":          rt.Cfg.CustomerIDSource,
 			"auto_purchase_enabled":       rt.Cfg.AutoPurchaseEnabled,
 			"acknowledgment_hash_present": rt.Cfg.AcknowledgmentHash != "",
 			"max_price_per_domain":        rt.Cfg.MaxPricePerDomain,

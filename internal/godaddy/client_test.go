@@ -2,9 +2,13 @@ package godaddy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	apperr "github.com/sportwhiz/gdcli/internal/errors"
 )
 
 func TestNormalizeProviderPriceMicros(t *testing.T) {
@@ -124,5 +128,81 @@ func TestListSubscriptionsMapsFieldsAndPagination(t *testing.T) {
 	}
 	if out.Pagination.Total != 22 || out.Pagination.Limit != 7 || out.Pagination.Offset != 14 {
 		t.Fatalf("unexpected pagination: %+v", out.Pagination)
+	}
+}
+
+func TestResponseLimitFor(t *testing.T) {
+	if got := responseLimitFor(http.MethodPost, "/v1/domains/available"); got != bulkResponseLimitBytes {
+		t.Fatalf("expected bulk cap for available bulk, got %d", got)
+	}
+	if got := responseLimitFor(http.MethodGet, "/v1/orders?limit=5&offset=0"); got != bulkResponseLimitBytes {
+		t.Fatalf("expected bulk cap for orders, got %d", got)
+	}
+	if got := responseLimitFor(http.MethodGet, "/v1/domains/available?domain=example.com"); got != smallResponseLimitBytes {
+		t.Fatalf("expected small cap for single availability, got %d", got)
+	}
+}
+
+func TestDoRejectsOversizedSingleResponse(t *testing.T) {
+	large := strings.Repeat("A", 3<<20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"domain":"example.com","available":true,"price":12.99,"currency":"%s"}`, large)))
+	}))
+	defer srv.Close()
+
+	c, err := NewHTTPClient(srv.URL, "k", "s")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if _, err := c.Available(context.Background(), "example.com"); err == nil {
+		t.Fatalf("expected oversized response error")
+	}
+}
+
+func TestDoAllowsLargeBulkResponseUnderBulkCap(t *testing.T) {
+	large := strings.Repeat("B", 3<<20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/domains/available" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(fmt.Sprintf(`[{"domain":"bulk.com","available":true,"price":12.99,"currency":"%s"}]`, large)))
+	}))
+	defer srv.Close()
+
+	c, err := NewHTTPClient(srv.URL, "k", "s")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	out, err := c.AvailableBulk(context.Background(), []string{"bulk.com"})
+	if err != nil {
+		t.Fatalf("expected bulk response to pass under bulk cap: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected one item")
+	}
+}
+
+func TestDoHandlesOversizedErrorBody(t *testing.T) {
+	large := strings.Repeat("C", 2<<20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"message":"%s"}`, large)))
+	}))
+	defer srv.Close()
+
+	c, err := NewHTTPClient(srv.URL, "k", "s")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	_, err = c.Available(context.Background(), "example.com")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var ae *apperr.AppError
+	if !apperr.As(err, &ae) {
+		t.Fatalf("expected app error, got %T", err)
+	}
+	if ae.Code != apperr.CodeRateLimited {
+		t.Fatalf("expected rate-limited code, got %s", ae.Code)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	apperr "github.com/sportwhiz/gdcli/internal/errors"
 	"github.com/sportwhiz/gdcli/internal/godaddy"
 	"github.com/sportwhiz/gdcli/internal/idempotency"
+	"github.com/sportwhiz/gdcli/internal/output"
 	"github.com/sportwhiz/gdcli/internal/rate"
 	"github.com/sportwhiz/gdcli/internal/safety"
 	"github.com/sportwhiz/gdcli/internal/store"
@@ -24,6 +26,44 @@ import (
 type Service struct {
 	RT     *app.Runtime
 	Client godaddy.Client
+}
+
+type v2RouterClient interface {
+	ResolveCustomerID(ctx context.Context, shopperID string) (string, error)
+	DomainDetailV2(ctx context.Context, customerID, domain string, includes []string) (map[string]any, error)
+	DomainDetailV1(ctx context.Context, domain string) (map[string]any, error)
+	RenewV2(ctx context.Context, customerID, domain string, years int, idempotencyKey string) (godaddy.RenewResult, error)
+	SetNameserversV2(ctx context.Context, customerID, domain string, nameservers []string) error
+	V2Get(ctx context.Context, path string, query url.Values, out any) error
+	V2Post(ctx context.Context, path string, body any, out any, idempotencyKey string) error
+	V2Put(ctx context.Context, path string, body any, out any) error
+	V2Patch(ctx context.Context, path string, body any, out any) error
+}
+
+func canUseV2(customerID string) bool {
+	return strings.TrimSpace(customerID) != ""
+}
+
+func doV2ThenV1[T any](useV2 bool, runV2 func() (T, error), runV1 func() (T, error)) (T, bool, error) {
+	var zero T
+	if !useV2 {
+		v1, err := runV1()
+		return v1, false, err
+	}
+	v2, err := runV2()
+	if err == nil {
+		return v2, true, nil
+	}
+	v1, v1Err := runV1()
+	if v1Err == nil {
+		return v1, false, nil
+	}
+	return zero, false, err
+}
+
+func (s *Service) v2Client() (v2RouterClient, bool) {
+	c, ok := s.Client.(v2RouterClient)
+	return c, ok
 }
 
 type BulkAvailabilityItem struct {
@@ -35,8 +75,24 @@ type BulkAvailabilityItem struct {
 	Duration int64                `json:"duration_ms"`
 }
 
+type PortfolioDetailItem struct {
+	Index       int      `json:"index"`
+	Domain      string   `json:"domain"`
+	Expires     string   `json:"expires,omitempty"`
+	NameServers []string `json:"nameServers,omitempty"`
+	APIVersion  string   `json:"api_version,omitempty"`
+	Success     bool     `json:"success"`
+	Error       string   `json:"error,omitempty"`
+}
+
 func New(rt *app.Runtime, client godaddy.Client) *Service {
 	return &Service{RT: rt, Client: client}
+}
+
+func (s *Service) appendOperationWithWarning(op store.Operation) {
+	if err := store.AppendOperation(op); err != nil {
+		output.LogErr(s.RT.ErrOut, "warning: failed writing operation log for operation_id=%s: %v", op.OperationID, err)
+	}
 }
 
 func (s *Service) Suggest(ctx context.Context, query string, tlds []string, limit int) (map[string]any, error) {
@@ -80,6 +136,74 @@ func (s *Service) Availability(ctx context.Context, domain string) (godaddy.Avai
 		return true, err
 	})
 	return out, err
+}
+
+func (s *Service) IdentityShow() map[string]any {
+	return map[string]any{
+		"shopper_id":               s.RT.Cfg.ShopperID,
+		"customer_id":              s.RT.Cfg.CustomerID,
+		"customer_id_resolved_at":  s.RT.Cfg.CustomerIDResolved,
+		"customer_id_source":       s.RT.Cfg.CustomerIDSource,
+		"v2_customer_scoped_ready": canUseV2(s.RT.Cfg.CustomerID),
+	}
+}
+
+func (s *Service) ResolveAndStoreCustomerID(ctx context.Context, shopperID string) (string, error) {
+	v2c, ok := s.v2Client()
+	if !ok {
+		return "", &apperr.AppError{Code: apperr.CodeInternal, Message: "client does not support v2 identity resolution"}
+	}
+	customerID, err := v2c.ResolveCustomerID(ctx, shopperID)
+	if err != nil {
+		return "", err
+	}
+	s.RT.Cfg.ShopperID = shopperID
+	s.RT.Cfg.CustomerID = customerID
+	s.RT.Cfg.CustomerIDResolved = time.Now().UTC().Format(time.RFC3339)
+	s.RT.Cfg.CustomerIDSource = "shopper_lookup"
+	return customerID, nil
+}
+
+func (s *Service) DomainDetail(ctx context.Context, domain string, includes []string) (map[string]any, error) {
+	v2c, ok := s.v2Client()
+	if !ok {
+		return nil, &apperr.AppError{Code: apperr.CodeInternal, Message: "client does not support domain detail"}
+	}
+	out, usedV2, err := doV2ThenV1(
+		canUseV2(s.RT.Cfg.CustomerID),
+		func() (map[string]any, error) { return v2c.DomainDetailV2(ctx, s.RT.Cfg.CustomerID, domain, includes) },
+		func() (map[string]any, error) { return v2c.DomainDetailV1(ctx, domain) },
+	)
+	if err != nil {
+		return nil, err
+	}
+	out["_api_version"] = map[bool]string{true: "v2", false: "v1"}[usedV2]
+	return out, nil
+}
+
+func (s *Service) SetNameserversSmart(ctx context.Context, domain string, nameservers []string) (string, error) {
+	if v2c, ok := s.v2Client(); ok && canUseV2(s.RT.Cfg.CustomerID) {
+		_, usedV2, err := doV2ThenV1(
+			true,
+			func() (struct{}, error) {
+				return struct{}{}, v2c.SetNameserversV2(ctx, s.RT.Cfg.CustomerID, domain, nameservers)
+			},
+			func() (struct{}, error) {
+				return struct{}{}, s.Client.SetNameservers(ctx, domain, nameservers)
+			},
+		)
+		if err != nil {
+			return "", err
+		}
+		if usedV2 {
+			return "v2", nil
+		}
+		return "v1", nil
+	}
+	if err := s.Client.SetNameservers(ctx, domain, nameservers); err != nil {
+		return "", err
+	}
+	return "v1", nil
 }
 
 func (s *Service) AvailabilityBulk(ctx context.Context, domains []string) ([]godaddy.Availability, error) {
@@ -244,7 +368,7 @@ func (s *Service) PurchaseConfirm(ctx context.Context, domain, token string, yea
 	if result.Currency == "" {
 		result.Currency = tok.Currency
 	}
-	_ = store.AppendOperation(store.Operation{
+	s.appendOperationWithWarning(store.Operation{
 		OperationID: tok.OperationKey,
 		Type:        "purchase",
 		Domain:      domain,
@@ -306,7 +430,7 @@ func (s *Service) PurchaseAuto(ctx context.Context, domain string, years int) (g
 	if result.Currency == "" {
 		result.Currency = avail.Currency
 	}
-	_ = store.AppendOperation(store.Operation{
+	s.appendOperationWithWarning(store.Operation{
 		OperationID: opKey,
 		Type:        "purchase",
 		Domain:      domain,
@@ -346,7 +470,22 @@ func (s *Service) Renew(ctx context.Context, domain string, years int, dryRun bo
 		if err := s.RT.Limiter.Wait(ctx); err != nil {
 			return false, err
 		}
-		r, err := s.Client.Renew(ctx, domain, years, opKey)
+		useV2 := canUseV2(s.RT.Cfg.CustomerID)
+		var r godaddy.RenewResult
+		if v2c, ok := s.v2Client(); ok && useV2 {
+			out, _, callErr := doV2ThenV1(
+				true,
+				func() (godaddy.RenewResult, error) {
+					return v2c.RenewV2(ctx, s.RT.Cfg.CustomerID, domain, years, opKey)
+				},
+				func() (godaddy.RenewResult, error) {
+					return s.Client.Renew(ctx, domain, years, opKey)
+				},
+			)
+			r, err = out, callErr
+		} else {
+			r, err = s.Client.Renew(ctx, domain, years, opKey)
+		}
 		rr = r
 		if err == nil {
 			return false, nil
@@ -366,7 +505,7 @@ func (s *Service) Renew(ctx context.Context, domain string, years int, dryRun bo
 	if rr.Currency == "" {
 		rr.Currency = currency
 	}
-	_ = store.AppendOperation(store.Operation{OperationID: opKey, Type: "renew", Domain: domain, Amount: rr.Price, Currency: rr.Currency, CreatedAt: time.Now(), Status: "succeeded"})
+	s.appendOperationWithWarning(store.Operation{OperationID: opKey, Type: "renew", Domain: domain, Amount: rr.Price, Currency: rr.Currency, CreatedAt: time.Now(), Status: "succeeded"})
 	return map[string]any{"domain": domain, "years": years, "dry_run": false, "price": rr.Price, "currency": rr.Currency, "order_id": rr.OrderID}, nil
 }
 
@@ -408,6 +547,90 @@ func (s *Service) ListPortfolio(ctx context.Context, expiringIn int, tld, contai
 			}
 		}
 		out = append(out, d)
+	}
+	return out, nil
+}
+
+func (s *Service) PortfolioWithNameservers(ctx context.Context, expiringIn int, tld, contains string, concurrency int) ([]PortfolioDetailItem, error) {
+	domains, err := s.ListPortfolio(ctx, expiringIn, tld, contains)
+	if err != nil {
+		return nil, err
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > 20 {
+		concurrency = 20
+	}
+
+	type job struct {
+		index int
+		item  godaddy.PortfolioDomain
+	}
+	type result struct {
+		item PortfolioDetailItem
+		err  error
+	}
+
+	jobs := make(chan job)
+	results := make(chan result, len(domains))
+	var wg sync.WaitGroup
+
+	worker := func() {
+		defer wg.Done()
+		for j := range jobs {
+			out := PortfolioDetailItem{
+				Index:   j.index,
+				Domain:  j.item.Domain,
+				Expires: j.item.Expires,
+				Success: true,
+			}
+			detail, err := s.DomainDetail(ctx, j.item.Domain, nil)
+			if err != nil {
+				out.Success = false
+				out.Error = err.Error()
+				results <- result{item: out, err: err}
+				continue
+			}
+			if ns, ok := detail["nameServers"].([]any); ok {
+				for _, n := range ns {
+					if s, ok := n.(string); ok && strings.TrimSpace(s) != "" {
+						out.NameServers = append(out.NameServers, s)
+					}
+				}
+			}
+			if v, ok := detail["_api_version"].(string); ok {
+				out.APIVersion = v
+			}
+			results <- result{item: out}
+		}
+	}
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	for i, d := range domains {
+		jobs <- job{index: i, item: d}
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	out := make([]PortfolioDetailItem, len(domains))
+	failures := 0
+	for r := range results {
+		out[r.item.Index] = r.item
+		if r.err != nil {
+			failures++
+		}
+	}
+	if failures > 0 {
+		return out, &apperr.AppError{
+			Code:    apperr.CodePartial,
+			Message: fmt.Sprintf("%d domain detail lookups failed", failures),
+			Details: map[string]any{"failed": failures, "total": len(domains)},
+		}
 	}
 	return out, nil
 }
@@ -462,6 +685,59 @@ func (s *Service) SubscriptionsList(ctx context.Context, limit, offset int) (map
 		"subscriptions": out.Subscriptions,
 		"pagination":    out.Pagination,
 	}, nil
+}
+
+func (s *Service) requireV2() (v2RouterClient, string, error) {
+	v2c, ok := s.v2Client()
+	if !ok {
+		return nil, "", &apperr.AppError{Code: apperr.CodeInternal, Message: "client does not support v2 operations"}
+	}
+	if !canUseV2(s.RT.Cfg.CustomerID) {
+		return nil, "", &apperr.AppError{Code: apperr.CodeValidation, Message: "customer_id is not configured; run account identity set/resolve first"}
+	}
+	return v2c, s.RT.Cfg.CustomerID, nil
+}
+
+func (s *Service) V2Get(ctx context.Context, path string, q url.Values) (map[string]any, error) {
+	v2c, _, err := s.requireV2()
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := v2c.V2Get(ctx, path, q, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Service) V2Apply(ctx context.Context, method, path string, body any, idempotencyKey string) (map[string]any, error) {
+	v2c, _, err := s.requireV2()
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	switch strings.ToUpper(method) {
+	case "POST":
+		err = v2c.V2Post(ctx, path, body, &out, idempotencyKey)
+	case "PUT":
+		err = v2c.V2Put(ctx, path, body, &out)
+	case "PATCH":
+		err = v2c.V2Patch(ctx, path, body, &out)
+	default:
+		return nil, &apperr.AppError{Code: apperr.CodeValidation, Message: "unsupported method", Details: map[string]any{"method": method}}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Service) V2PathCustomer(pathTemplate string) (string, error) {
+	_, customerID, err := s.requireV2()
+	if err != nil {
+		return "", err
+	}
+	return strings.ReplaceAll(pathTemplate, "{customerId}", url.PathEscape(customerID)), nil
 }
 
 func (s *Service) DNSAudit(ctx context.Context, domains []string) ([]map[string]any, error) {
@@ -521,7 +797,22 @@ func (s *Service) DNSApplyTemplate(ctx context.Context, tmpl string, domains []s
 		}
 		switch tmpl {
 		case "afternic", "afternic-nameservers":
-			if err := s.Client.SetNameservers(ctx, d, ns); err != nil {
+			setNS := func() error {
+				if v2c, ok := s.v2Client(); ok && canUseV2(s.RT.Cfg.CustomerID) {
+					_, _, err := doV2ThenV1(
+						true,
+						func() (struct{}, error) {
+							return struct{}{}, v2c.SetNameserversV2(ctx, s.RT.Cfg.CustomerID, d, ns)
+						},
+						func() (struct{}, error) {
+							return struct{}{}, s.Client.SetNameservers(ctx, d, ns)
+						},
+					)
+					return err
+				}
+				return s.Client.SetNameservers(ctx, d, ns)
+			}
+			if err := setNS(); err != nil {
 				out = append(out, map[string]any{"domain": d, "applied": false, "error": err.Error()})
 				continue
 			}
@@ -534,7 +825,22 @@ func (s *Service) DNSApplyTemplate(ctx context.Context, tmpl string, domains []s
 		default:
 			if custom != nil {
 				if len(custom.NameServers) > 0 {
-					if err := s.Client.SetNameservers(ctx, d, custom.NameServers); err != nil {
+					setCustomNS := func() error {
+						if v2c, ok := s.v2Client(); ok && canUseV2(s.RT.Cfg.CustomerID) {
+							_, _, err := doV2ThenV1(
+								true,
+								func() (struct{}, error) {
+									return struct{}{}, v2c.SetNameserversV2(ctx, s.RT.Cfg.CustomerID, d, custom.NameServers)
+								},
+								func() (struct{}, error) {
+									return struct{}{}, s.Client.SetNameservers(ctx, d, custom.NameServers)
+								},
+							)
+							return err
+						}
+						return s.Client.SetNameservers(ctx, d, custom.NameServers)
+					}
+					if err := setCustomNS(); err != nil {
 						out = append(out, map[string]any{"domain": d, "applied": false, "error": err.Error()})
 						continue
 					}

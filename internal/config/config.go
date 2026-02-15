@@ -14,6 +14,10 @@ const (
 
 type Config struct {
 	APIEnvironment      string  `json:"api_environment"`
+	ShopperID           string  `json:"shopper_id,omitempty"`
+	CustomerID          string  `json:"customer_id,omitempty"`
+	CustomerIDResolved  string  `json:"customer_id_resolved_at,omitempty"`
+	CustomerIDSource    string  `json:"customer_id_source,omitempty"`
 	AutoPurchaseEnabled bool    `json:"auto_purchase_enabled"`
 	AcknowledgmentHash  string  `json:"acknowledgment_hash,omitempty"`
 	MaxPricePerDomain   float64 `json:"max_price_per_domain"`
