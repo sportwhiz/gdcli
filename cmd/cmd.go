@@ -431,6 +431,16 @@ func runDomains(rt *app.Runtime, args []string) error {
 		expiring := parseIntDefault(flags["expiring-in"], 0)
 		tld := flags["tld"]
 		contains := flags["contains"]
+		withNameservers := hasBoolFlag(rest, "with-nameservers")
+		if withNameservers {
+			concurrency := parseIntDefault(flags["concurrency"], 5)
+			res, err := svc.PortfolioWithNameservers(rt.Ctx, expiring, tld, contains, concurrency)
+			if err != nil {
+				emitError(rt, "domains list", err)
+				return err
+			}
+			return emitSuccess(rt, "domains list", map[string]any{"domains": res, "source": "portfolio_with_details"})
+		}
 		res, err := svc.ListPortfolio(rt.Ctx, expiring, tld, contains)
 		if err != nil {
 			emitError(rt, "domains list", err)

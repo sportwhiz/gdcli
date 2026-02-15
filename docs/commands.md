@@ -29,7 +29,7 @@
 - `gdcli domains purchase <domain> --auto [--years N]`
 - `gdcli domains renew <domain> --years N [--dry-run] [--auto-approve]`
 - `gdcli domains renew-bulk <file> --years N [--dry-run] [--auto-approve]`
-- `gdcli domains list [--expiring-in N] [--tld TLD] [--contains TEXT]`
+- `gdcli domains list [--expiring-in N] [--tld TLD] [--contains TEXT] [--with-nameservers] [--concurrency N]`
 - `gdcli domains portfolio [--expiring-in N] [--tld TLD] [--contains TEXT] [--concurrency N]`
 - `gdcli domains detail <domain> [--includes actions,contacts,dnssecRecords,registryStatusCodes]`
 - `gdcli domains actions <domain> [--type ACTION_TYPE]`
