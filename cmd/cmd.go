@@ -93,7 +93,7 @@ func parseGlobalFlags(args []string) (globalFlags, []string, error) {
 func runInit(rt *app.Runtime, args []string) error {
 	if len(args) > 0 && isHelpToken(args[0]) {
 		return emitSuccess(rt, "init help", map[string]any{
-			"usage": "gdcli init [--api-environment prod|ote] [--max-price N] [--max-daily-spend N] [--max-domains-per-day N] [--shopper-id ID --resolve-customer-id] [--enable-auto-purchase --ack \"I UNDERSTAND PURCHASES ARE FINAL\"] [--store-keychain --api-key KEY --api-secret SECRET] [--verify]",
+			"usage": "gdcli init [--api-environment prod|ote] [--max-price N] [--max-daily-spend N] [--max-domains-per-day N] [--shopper-id ID|$GDCLI_SHOPPER_ID --resolve-customer-id] [--enable-auto-purchase --ack \"I UNDERSTAND PURCHASES ARE FINAL\"] [--store-keychain --api-key KEY --api-secret SECRET] [--verify]",
 		})
 	}
 
@@ -168,7 +168,7 @@ func runInit(rt *app.Runtime, args []string) error {
 	if hasBoolFlag(args, "resolve-customer-id") {
 		shopperID := strings.TrimSpace(rt.Cfg.ShopperID)
 		if shopperID == "" {
-			err := &apperr.AppError{Code: apperr.CodeValidation, Message: "--resolve-customer-id requires --shopper-id or existing shopper_id in config"}
+			err := &apperr.AppError{Code: apperr.CodeValidation, Message: "--resolve-customer-id requires --shopper-id, GDCLI_SHOPPER_ID, or existing shopper_id in config"}
 			emitError(rt, "init", err)
 			return err
 		}
@@ -190,6 +190,7 @@ func runInit(rt *app.Runtime, args []string) error {
 		changed["customer_id"] = customerID
 		changed["customer_id_source"] = rt.Cfg.CustomerIDSource
 		changed["customer_id_resolved_at"] = rt.Cfg.CustomerIDResolved
+		_ = os.Setenv("GDCLI_CUSTOMER_ID", customerID)
 		customerResolved = true
 	}
 
@@ -234,6 +235,10 @@ func runInit(rt *app.Runtime, args []string) error {
 		"keychain_stored":   keychainStored,
 		"verified":          verified,
 		"customer_resolved": customerResolved,
+		"env_identity": map[string]any{
+			"shopper_id_env":  "GDCLI_SHOPPER_ID",
+			"customer_id_env": "GDCLI_CUSTOMER_ID",
+		},
 		"verification_info": verifyResult,
 		"next_steps": []string{
 			"set GODADDY_API_KEY and GODADDY_API_SECRET (or use --store-keychain on macOS)",

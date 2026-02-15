@@ -58,11 +58,11 @@ func TestResolveAndStoreCustomerID(t *testing.T) {
 	rt := makeRuntime(t)
 	svc := New(rt, &fakeV2Client{})
 
-	got, err := svc.ResolveAndStoreCustomerID(context.Background(), "660323812")
+	got, err := svc.ResolveAndStoreCustomerID(context.Background(), "123456789")
 	if err != nil {
 		t.Fatalf("resolve customer id: %v", err)
 	}
-	if got != "cust-123" || rt.Cfg.CustomerID != "cust-123" || rt.Cfg.ShopperID != "660323812" {
+	if got != "cust-123" || rt.Cfg.CustomerID != "cust-123" || rt.Cfg.ShopperID != "123456789" {
 		t.Fatalf("unexpected identity state: got=%q cfg=%+v", got, rt.Cfg)
 	}
 }
