@@ -49,6 +49,8 @@ Check installed version and update status:
 gdcli version --check --json
 ```
 
+Startup commands also perform a best-effort update notice check (cached to once per 24h) and print notices to `stderr` only.
+
 If you are using OpenClaw, also complete skill setup:
 
 - [`docs/openclaw-setup.md`](docs/openclaw-setup.md)
@@ -222,6 +224,7 @@ Config file: `~/.gdcli/config.json`
 - `GODADDY_API_KEY`
 - `GODADDY_API_SECRET`
 - `GDCLI_BASE_URL` (optional API override for testing)
+- `GDCLI_DISABLE_UPDATE_CHECK` (`1`/`true`/`yes` to disable startup update notices)
 
 macOS keychain fallback is supported under service `gdcli` with accounts:
 

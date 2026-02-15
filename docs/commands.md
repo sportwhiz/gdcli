@@ -48,3 +48,11 @@
 - `gdcli settings auto-purchase disable`
 - `gdcli settings caps set --max-price N --max-daily-spend N --max-domains-per-day N`
 - `gdcli settings show`
+
+## Update Behavior
+
+- Normal commands may print update notices to `stderr` (cached every 24 hours).
+- Use `--quiet` or set `GDCLI_DISABLE_UPDATE_CHECK=1` to suppress startup notices.
+- Explicit update commands remain:
+  - `gdcli version --check --json`
+  - `gdcli self-update --json`

@@ -45,6 +45,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	maybeStartUpdateNotifier(rt, rest[0])
 
 	switch rest[0] {
 	case "init":
