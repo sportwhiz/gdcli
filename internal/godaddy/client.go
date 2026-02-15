@@ -362,6 +362,16 @@ func (c *HTTPClient) Renew(ctx context.Context, domain string, years int, idempo
 	return out, nil
 }
 
+func (c *HTTPClient) RenewAsShopper(ctx context.Context, shopperID, domain string, years int, idempotencyKey string) (RenewResult, error) {
+	body := map[string]any{"period": years}
+	var out RenewResult
+	headers := map[string]string{"X-Shopper-Id": shopperID}
+	if err := c.doWithHeaders(ctx, http.MethodPost, "/v1/domains/"+url.PathEscape(domain)+"/renew", body, &out, idempotencyKey, headers); err != nil {
+		return RenewResult{}, err
+	}
+	return out, nil
+}
+
 func (c *HTTPClient) ListDomains(ctx context.Context) ([]PortfolioDomain, error) {
 	var out []PortfolioDomain
 	if err := c.do(ctx, http.MethodGet, "/v1/domains", nil, &out, ""); err != nil {
@@ -618,6 +628,10 @@ func (c *HTTPClient) SetNameserversV2(ctx context.Context, customerID, domain st
 }
 
 func (c *HTTPClient) do(ctx context.Context, method, path string, body any, out any, idempotencyKey string) error {
+	return c.doWithHeaders(ctx, method, path, body, out, idempotencyKey, nil)
+}
+
+func (c *HTTPClient) doWithHeaders(ctx context.Context, method, path string, body any, out any, idempotencyKey string, extraHeaders map[string]string) error {
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -637,6 +651,12 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, body any, out 
 	}
 	if idempotencyKey != "" {
 		req.Header.Set("X-Idempotency-Key", idempotencyKey)
+	}
+	for k, v := range extraHeaders {
+		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			continue
+		}
+		req.Header.Set(k, v)
 	}
 
 	// #nosec G704 -- base URL is validated to approved GoDaddy/loopback hosts in validateBaseURL.

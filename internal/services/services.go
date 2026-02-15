@@ -30,6 +30,10 @@ type Service struct {
 	Client godaddy.Client
 }
 
+type renewAsShopperClient interface {
+	RenewAsShopper(ctx context.Context, shopperID, domain string, years int, idempotencyKey string) (godaddy.RenewResult, error)
+}
+
 type v2RouterClient interface {
 	ResolveCustomerID(ctx context.Context, shopperID string) (string, error)
 	DomainDetailV2(ctx context.Context, customerID, domain string, includes []string) (map[string]any, error)
@@ -60,7 +64,46 @@ func doV2ThenV1[T any](useV2 bool, runV2 func() (T, error), runV1 func() (T, err
 	if v1Err == nil {
 		return v1, false, nil
 	}
-	return zero, false, err
+	return zero, false, v1Err
+}
+
+func isInvalidPaymentInfo(err error) bool {
+	var ae *apperr.AppError
+	if !apperr.As(err, &ae) || ae == nil || ae.Code != apperr.CodeProvider || ae.Details == nil {
+		return false
+	}
+	providerRaw, ok := ae.Details["provider"]
+	if !ok {
+		return false
+	}
+	provider, ok := providerRaw.(map[string]any)
+	if !ok {
+		return false
+	}
+	code, _ := provider["code"].(string)
+	return strings.EqualFold(strings.TrimSpace(code), "INVALID_PAYMENT_INFO")
+}
+
+func enrichRenewError(err error) error {
+	if !isInvalidPaymentInfo(err) {
+		return err
+	}
+	var ae *apperr.AppError
+	_ = apperr.As(err, &ae)
+	details := map[string]any{}
+	if ae != nil && ae.Details != nil {
+		for k, v := range ae.Details {
+			details[k] = v
+		}
+	}
+	details["remediation"] = "Fund your GoDaddy Good As Gold balance or update your default payment profile, then retry renewal."
+	return &apperr.AppError{
+		Code:      apperr.CodeProvider,
+		Message:   "renewal failed: invalid payment info. Fund Good As Gold or update payment profile in GoDaddy.",
+		Details:   details,
+		Retryable: false,
+		Cause:     err,
+	}
 }
 
 func renewPriceMicros(v any) (int64, error) {
@@ -358,7 +401,7 @@ func (s *Service) Suggest(ctx context.Context, query string, tlds []string, limi
 		return true, err
 	})
 	if err != nil {
-		return nil, err
+		return nil, enrichRenewError(err)
 	}
 	return map[string]any{"query": query, "suggestions": out}, nil
 }
@@ -731,13 +774,28 @@ func (s *Service) Renew(ctx context.Context, domain string, years int, dryRun bo
 					return godaddy.RenewResult{}, &apperr.AppError{Code: apperr.CodeValidation, Message: "v2 renew requires customer_id or shopper_id"}
 				},
 				func() (godaddy.RenewResult, error) {
+					if rc, ok := s.Client.(renewAsShopperClient); ok {
+						shopper := strings.TrimSpace(s.RT.Cfg.ShopperID)
+						if shopper != "" {
+							return rc.RenewAsShopper(ctx, shopper, domain, years, opKey)
+						}
+					}
 					return s.Client.Renew(ctx, domain, years, opKey)
 				},
 			)
 			usedV2 = used
 			r, err = out, callErr
 		} else {
-			r, err = s.Client.Renew(ctx, domain, years, opKey)
+			if rc, ok := s.Client.(renewAsShopperClient); ok {
+				shopper := strings.TrimSpace(s.RT.Cfg.ShopperID)
+				if shopper != "" {
+					r, err = rc.RenewAsShopper(ctx, shopper, domain, years, opKey)
+				} else {
+					r, err = s.Client.Renew(ctx, domain, years, opKey)
+				}
+			} else {
+				r, err = s.Client.Renew(ctx, domain, years, opKey)
+			}
 			usedV2 = false
 		}
 		rr = r
@@ -752,7 +810,7 @@ func (s *Service) Renew(ctx context.Context, domain string, years int, dryRun bo
 	})
 	if err != nil {
 		_ = s.finalizeOperation(opKey, priceEstimate, currency, "failed")
-		return nil, err
+		return nil, enrichRenewError(err)
 	}
 	if rr.Price == 0 {
 		rr.Price = priceEstimate
