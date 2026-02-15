@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/sportwhiz/gdcli/internal/config"
@@ -152,10 +151,10 @@ func LoadAndSaveTokens(mutator func(*TokenStore) error) error {
 		return err
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lockFile(f); err != nil {
 		return err
 	}
-	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	defer func() { _ = unlockFile(f) }()
 
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
