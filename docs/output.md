@@ -5,6 +5,8 @@
 - `stdout`: structured payloads only
 - `stderr`: warnings/logs
 
+`gdcli` may emit startup update notices to `stderr` (never `stdout`) unless disabled by `--quiet` or `GDCLI_DISABLE_UPDATE_CHECK`.
+
 ## Modes
 
 - `--json`: single envelope
