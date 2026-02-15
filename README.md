@@ -15,6 +15,7 @@ GoDaddy-focused, agent-friendly domain investor CLI.
 - [`docs/config.md`](docs/config.md)
 - [`docs/output.md`](docs/output.md)
 - [`docs/architecture.md`](docs/architecture.md)
+- [`docs/openclaw-setup.md`](docs/openclaw-setup.md)
 
 ## Install
 
@@ -41,6 +42,10 @@ Verify:
 ```bash
 gdcli help --json
 ```
+
+If you are using OpenClaw, also complete skill setup:
+
+- [`docs/openclaw-setup.md`](docs/openclaw-setup.md)
 
 ## 5-Minute Setup
 
