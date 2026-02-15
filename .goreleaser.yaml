@@ -1,0 +1,66 @@
+version: 2
+
+project_name: gdcli
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: gdcli
+    main: ./cmd/gdcli
+    binary: gdcli
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  use: git
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+release:
+  github:
+    owner: sportwhiz
+    name: gdcli
+
+brews:
+  - name: gdcli
+    repository:
+      owner: sportwhiz
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/sportwhiz/gdcli
+    description: GoDaddy-focused domain investor CLI for OpenClaw
+    install: |
+      bin.install "gdcli"
+    test: |
+      system "#{bin}/gdcli", "help", "--json"
