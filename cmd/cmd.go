@@ -49,6 +49,10 @@ func run(args []string) error {
 	switch rest[0] {
 	case "init":
 		return runInit(rt, rest[1:])
+	case "version":
+		return runVersion(rt, rest[1:])
+	case "self-update":
+		return runSelfUpdate(rt, rest[1:])
 	case "domains":
 		return runDomains(rt, rest[1:])
 	case "dns":
@@ -56,7 +60,7 @@ func run(args []string) error {
 	case "settings":
 		return runSettings(rt, rest[1:])
 	case "--help", "help", "-h":
-		return emitSuccess(rt, "help", map[string]any{"commands": []string{"init", "domains", "dns", "settings"}})
+		return emitSuccess(rt, "help", map[string]any{"commands": []string{"init", "version", "self-update", "domains", "dns", "settings"}})
 	default:
 		err := usageError("unknown command: " + rest[0])
 		emitError(rt, "gdcli", err)

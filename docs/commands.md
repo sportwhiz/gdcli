@@ -3,6 +3,8 @@
 ## Top-level
 
 - `gdcli init`
+- `gdcli version [--check]`
+- `gdcli self-update`
 - `gdcli domains ...`
 - `gdcli dns ...`
 - `gdcli settings ...`

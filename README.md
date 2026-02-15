@@ -43,6 +43,12 @@ Verify:
 gdcli help --json
 ```
 
+Check installed version and update status:
+
+```bash
+gdcli version --check --json
+```
+
 If you are using OpenClaw, also complete skill setup:
 
 - [`docs/openclaw-setup.md`](docs/openclaw-setup.md)
@@ -99,6 +105,23 @@ gdcli settings auto-purchase enable --ack "I UNDERSTAND PURCHASES ARE FINAL" --j
   - `--ndjson`
   - `--quiet`
 
+## Upgrading
+
+```bash
+brew update && brew upgrade gdcli
+```
+
+```bash
+go install github.com/sportwhiz/gdcli/cmd/gdcli@latest
+```
+
+Built-in helper:
+
+```bash
+gdcli self-update --json
+gdcli version --check --json
+```
+
 ## Common Workflows
 
 ### Discovery
@@ -137,6 +160,11 @@ gdcli dns apply --template afternic-nameservers --domains /tmp/portfolio.txt --d
 ```
 
 ## Commands
+
+### Top-level
+
+- `version [--check]`
+- `self-update`
 
 ### `domains`
 
