@@ -69,6 +69,8 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	path = filepath.Clean(path)
+	// #nosec G304 -- path is derived from user home + fixed filename.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

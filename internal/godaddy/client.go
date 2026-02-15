@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -28,10 +29,10 @@ type Client interface {
 }
 
 type HTTPClient struct {
-	BaseURL    string
-	APIKey     string
-	APISecret  string
-	HTTPClient *http.Client
+	baseURL    string
+	apiKey     string
+	apiSecret  string
+	httpClient *http.Client
 }
 
 type Suggestion struct {
@@ -73,13 +74,43 @@ type DNSRecord struct {
 	TTL  int    `json:"ttl,omitempty"`
 }
 
-func NewHTTPClient(baseURL, key, secret string) *HTTPClient {
-	return &HTTPClient{
-		BaseURL:    strings.TrimSuffix(baseURL, "/"),
-		APIKey:     key,
-		APISecret:  secret,
-		HTTPClient: &http.Client{Timeout: 20 * time.Second},
+func NewHTTPClient(baseURL, key, secret string) (*HTTPClient, error) {
+	if err := validateBaseURL(baseURL); err != nil {
+		return nil, err
 	}
+	return &HTTPClient{
+		baseURL:    strings.TrimSuffix(baseURL, "/"),
+		apiKey:     key,
+		apiSecret:  secret,
+		httpClient: &http.Client{Timeout: 20 * time.Second},
+	}, nil
+}
+
+func validateBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return &apperr.AppError{Code: apperr.CodeValidation, Message: "invalid base URL"}
+	}
+	host := strings.ToLower(u.Hostname())
+	allowedHosts := map[string]bool{
+		"api.godaddy.com":     true,
+		"api.ote-godaddy.com": true,
+		"localhost":           true,
+		"127.0.0.1":           true,
+		"::1":                 true,
+	}
+	if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
+		return &apperr.AppError{Code: apperr.CodeValidation, Message: "base URL must target GoDaddy APIs or loopback"}
+	}
+	if !allowedHosts[host] {
+		return &apperr.AppError{Code: apperr.CodeValidation, Message: "base URL host is not allowed"}
+	}
+	if host == "api.godaddy.com" || host == "api.ote-godaddy.com" {
+		if !strings.EqualFold(u.Scheme, "https") {
+			return &apperr.AppError{Code: apperr.CodeValidation, Message: "GoDaddy API base URL must use https"}
+		}
+	}
+	return nil
 }
 
 func (c *HTTPClient) Suggest(ctx context.Context, query string, tlds []string, limit int) ([]Suggestion, error) {
@@ -180,11 +211,11 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, body any, out 
 		}
 		r = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, r)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, r)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "sso-key "+c.APIKey+":"+c.APISecret)
+	req.Header.Set("Authorization", "sso-key "+c.apiKey+":"+c.apiSecret)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -193,7 +224,8 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, body any, out 
 		req.Header.Set("X-Idempotency-Key", idempotencyKey)
 	}
 
-	resp, err := c.HTTPClient.Do(req)
+	// #nosec G704 -- base URL is validated to approved GoDaddy/loopback hosts in validateBaseURL.
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return &apperr.AppError{Code: apperr.CodeProvider, Message: "provider request failed", Retryable: true, Cause: err}
 	}
