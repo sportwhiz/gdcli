@@ -11,7 +11,7 @@ go install github.com/sportwhiz/gdcli/cmd/gdcli@latest
 ## Initialize
 
 ```bash
-gdcli init --api-environment prod --max-price 25 --max-daily-spend 100 --max-domains-per-day 5 --json
+gdcli init --api-environment prod --shopper-id 660323812 --resolve-customer-id --max-price 25 --max-daily-spend 100 --max-domains-per-day 5 --json
 ```
 
 Optional macOS keychain bootstrap:
@@ -24,6 +24,7 @@ gdcli init --store-keychain --api-key "$GODADDY_API_KEY" --api-secret "$GODADDY_
 
 ```bash
 gdcli init --verify --json
+gdcli account identity show --json
 gdcli settings show --json
 gdcli domains avail example.com --json
 ```

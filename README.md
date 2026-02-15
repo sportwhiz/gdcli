@@ -82,7 +82,13 @@ gdcli domains purchase example.com --confirm <TOKEN> --json
 Bootstrap with guided init:
 
 ```bash
-gdcli init --api-environment prod --max-price 25 --max-daily-spend 100 --max-domains-per-day 5 --verify --json
+gdcli init --api-environment prod --shopper-id 660323812 --resolve-customer-id --max-price 25 --max-daily-spend 100 --max-domains-per-day 5 --verify --json
+```
+
+Confirm identity was stored for v2 customer-scoped calls:
+
+```bash
+gdcli account identity show --json
 ```
 
 ## Safety Model
