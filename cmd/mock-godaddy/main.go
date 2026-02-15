@@ -48,12 +48,44 @@ type dnsRecord struct {
 	TTL  int    `json:"ttl,omitempty"`
 }
 
+type mockOrder struct {
+	OrderID   string `json:"orderId"`
+	CreatedAt string `json:"createdAt"`
+	Currency  string `json:"currency"`
+	Items     []struct {
+		Label string `json:"label"`
+	} `json:"items"`
+	Pricing struct {
+		Total int `json:"total"`
+	} `json:"pricing"`
+}
+
+type mockSubscription struct {
+	SubscriptionID string `json:"subscriptionId"`
+	Status         string `json:"status"`
+	Label          string `json:"label"`
+	CreatedAt      string `json:"createdAt"`
+	ExpiresAt      string `json:"expiresAt"`
+	Renewable      bool   `json:"renewable"`
+	RenewAuto      bool   `json:"renewAuto"`
+	Product        struct {
+		ProductGroupKey string `json:"productGroupKey"`
+		Namespace       string `json:"namespace"`
+	} `json:"product"`
+	Billing struct {
+		Status  string `json:"status"`
+		RenewAt string `json:"renewAt"`
+	} `json:"billing"`
+}
+
 type state struct {
 	mu           sync.Mutex
 	portfolio    []portfolioDomain
 	availability map[string]availability
 	nameservers  map[string][]string
 	records      map[string][]dnsRecord
+	orders       []mockOrder
+	subs         []mockSubscription
 	orderCounter int
 }
 
@@ -75,6 +107,36 @@ func main() {
 			"alpha.com": {{Type: "A", Name: "@", Data: "1.2.3.4", TTL: 600}},
 			"brand.ai":  {{Type: "A", Name: "@", Data: "5.6.7.8", TTL: 600}, {Type: "TXT", Name: "@", Data: "verify=ok", TTL: 600}},
 		},
+		orders: []mockOrder{
+			func() mockOrder {
+				var o mockOrder
+				o.OrderID = "3938269704"
+				o.CreatedAt = "2025-11-05T12:37:45.000Z"
+				o.Currency = "USD"
+				o.Items = []struct {
+					Label string `json:"label"`
+				}{{Label: ".COM Domain Name Registration - 1 Year (recurring)"}}
+				o.Pricing.Total = 10690000
+				return o
+			}(),
+		},
+		subs: []mockSubscription{
+			func() mockSubscription {
+				var s mockSubscription
+				s.SubscriptionID = "757644825:2"
+				s.Status = "ACTIVE"
+				s.Label = "EXAMPLE.COM"
+				s.CreatedAt = "2025-11-05T12:37:46.560Z"
+				s.ExpiresAt = "2026-11-05T14:37:57.000Z"
+				s.Renewable = true
+				s.RenewAuto = true
+				s.Product.Namespace = "domain"
+				s.Product.ProductGroupKey = "domains"
+				s.Billing.Status = "CURRENT"
+				s.Billing.RenewAt = "2026-11-06T14:37:57.000Z"
+				return s
+			}(),
+		},
 	}
 
 	mux := http.NewServeMux()
@@ -83,6 +145,8 @@ func main() {
 	mux.HandleFunc("/v1/domains/purchase", s.handlePurchase)
 	mux.HandleFunc("/v1/domains", s.handleDomains)
 	mux.HandleFunc("/v1/domains/", s.handleDomainSub)
+	mux.HandleFunc("/v1/orders", s.handleOrders)
+	mux.HandleFunc("/v1/subscriptions", s.handleSubscriptions)
 
 	addr := ":8787"
 	log.Printf("mock godaddy listening on %s", addr)
@@ -94,6 +158,78 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func (s *state) handleOrders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"message": "method not allowed"})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	total := len(s.orders)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	items := s.orders[start:end]
+	writeJSON(w, http.StatusOK, map[string]any{
+		"orders": items,
+		"pagination": map[string]any{
+			"first": "http://localhost:8787/v1/orders?limit=" + strconv.Itoa(limit) + "&offset=0",
+			"last":  "http://localhost:8787/v1/orders?limit=" + strconv.Itoa(limit) + "&offset=" + strconv.Itoa(max(0, total-1)),
+			"next":  "http://localhost:8787/v1/orders?limit=" + strconv.Itoa(limit) + "&offset=" + strconv.Itoa(end),
+			"total": total,
+		},
+	})
+}
+
+func (s *state) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"message": "method not allowed"})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	total := len(s.subs)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	items := s.subs[start:end]
+	writeJSON(w, http.StatusOK, map[string]any{
+		"subscriptions": items,
+		"pagination": map[string]any{
+			"first": "http://localhost:8787/v1/subscriptions?limit=" + strconv.Itoa(limit) + "&offset=0",
+			"last":  "http://localhost:8787/v1/subscriptions?limit=" + strconv.Itoa(limit) + "&offset=" + strconv.Itoa(max(0, total-1)),
+			"next":  "http://localhost:8787/v1/subscriptions?limit=" + strconv.Itoa(limit) + "&offset=" + strconv.Itoa(end),
+			"total": total,
+		},
+	})
 }
 
 func (s *state) handleSuggest(w http.ResponseWriter, r *http.Request) {
@@ -268,4 +404,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

@@ -43,6 +43,12 @@ Verify:
 gdcli help --json
 ```
 
+Check installed version and update status:
+
+```bash
+gdcli version --check --json
+```
+
 If you are using OpenClaw, also complete skill setup:
 
 - [`docs/openclaw-setup.md`](docs/openclaw-setup.md)
@@ -99,6 +105,23 @@ gdcli settings auto-purchase enable --ack "I UNDERSTAND PURCHASES ARE FINAL" --j
   - `--ndjson`
   - `--quiet`
 
+## Upgrading
+
+```bash
+brew update && brew upgrade gdcli
+```
+
+```bash
+go install github.com/sportwhiz/gdcli/cmd/gdcli@latest
+```
+
+Built-in helper:
+
+```bash
+gdcli self-update --json
+gdcli version --check --json
+```
+
 ## Common Workflows
 
 ### Discovery
@@ -128,6 +151,14 @@ gdcli domains renew alpha.com --years 1 --auto-approve --json
 gdcli domains list --expiring-in 30 --tld com --json
 ```
 
+### Account Intelligence
+
+```bash
+gdcli account orders list --limit 5 --offset 0 --json
+gdcli account subscriptions list --limit 5 --offset 0 --json
+gdcli account orders list --limit 5 --offset 0 --ndjson
+```
+
 ### DNS Audit and Apply
 
 ```bash
@@ -138,6 +169,11 @@ gdcli dns apply --template afternic-nameservers --domains /tmp/portfolio.txt --d
 
 ## Commands
 
+### Top-level
+
+- `version [--check]`
+- `self-update`
+
 ### `domains`
 
 - `domains suggest <query> [--tlds com,ai] [--limit N]`
@@ -147,6 +183,11 @@ gdcli dns apply --template afternic-nameservers --domains /tmp/portfolio.txt --d
 - `domains renew <domain> --years N [--dry-run] [--auto-approve]`
 - `domains renew-bulk <file> --years N [--dry-run] [--auto-approve]`
 - `domains list [--expiring-in N] [--tld TLD] [--contains TEXT]`
+
+### `account`
+
+- `account orders list [--limit N] [--offset N]`
+- `account subscriptions list [--limit N] [--offset N]`
 
 ### `dns`
 

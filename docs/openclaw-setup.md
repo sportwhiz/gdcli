@@ -60,6 +60,12 @@ Use `gdcli` for GoDaddy domain investor workflows.
 3. `gdcli domains purchase <domain> --json`
 4. If approved: `gdcli domains purchase <domain> --confirm <token> --json`
 
+## Account and billing visibility
+
+- Orders page: `gdcli account orders list --limit 50 --offset 0 --json`
+- Subscriptions page: `gdcli account subscriptions list --limit 50 --offset 0 --json`
+- Stream mode for agents: `gdcli account orders list --limit 50 --offset 0 --ndjson`
+
 ## DNS flow
 
 - Audit: `gdcli dns audit --domains <file> --json`
