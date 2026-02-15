@@ -106,6 +106,60 @@ func ValidateAndUseToken(tokenID, domain string, now time.Time) (store.ConfirmTo
 	return used, nil
 }
 
+func ValidateToken(tokenID, domain string, now time.Time) (store.ConfirmToken, error) {
+	ts, err := store.LoadTokens()
+	if err != nil {
+		return store.ConfirmToken{}, err
+	}
+	pruneTokens(ts, now)
+	for _, t := range ts.Tokens {
+		if t.TokenID != tokenID {
+			continue
+		}
+		if t.Domain != domain {
+			return store.ConfirmToken{}, &apperr.AppError{Code: apperr.CodeConfirmation, Message: "token domain mismatch"}
+		}
+		if t.Used {
+			return store.ConfirmToken{}, &apperr.AppError{Code: apperr.CodeConfirmation, Message: "confirmation token already used"}
+		}
+		if now.UTC().After(t.ExpiresAt) {
+			return store.ConfirmToken{}, &apperr.AppError{Code: apperr.CodeConfirmation, Message: "confirmation token expired"}
+		}
+		return t, nil
+	}
+	return store.ConfirmToken{}, &apperr.AppError{Code: apperr.CodeConfirmation, Message: "confirmation token not found"}
+}
+
+func MarkTokenUsed(tokenID, domain string, now time.Time) error {
+	var found bool
+	err := store.LoadAndSaveTokens(func(ts *store.TokenStore) error {
+		pruneTokens(ts, now)
+		for i := range ts.Tokens {
+			t := &ts.Tokens[i]
+			if t.TokenID != tokenID {
+				continue
+			}
+			found = true
+			if t.Domain != domain {
+				return &apperr.AppError{Code: apperr.CodeConfirmation, Message: "token domain mismatch"}
+			}
+			if now.UTC().After(t.ExpiresAt) {
+				return &apperr.AppError{Code: apperr.CodeConfirmation, Message: "confirmation token expired"}
+			}
+			t.Used = true
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !found {
+		return &apperr.AppError{Code: apperr.CodeConfirmation, Message: "confirmation token not found"}
+	}
+	return nil
+}
+
 func RequireAutoEnabled(autoEnabled bool, ackHash string) error {
 	if !autoEnabled || ackHash == "" {
 		return &apperr.AppError{Code: apperr.CodeSafety, Message: "auto-purchase is not enabled"}

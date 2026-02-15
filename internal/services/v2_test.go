@@ -4,18 +4,22 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"strings"
 	"testing"
 
+	apperr "github.com/sportwhiz/gdcli/internal/errors"
 	"github.com/sportwhiz/gdcli/internal/godaddy"
 )
 
 type fakeV2Client struct {
 	fakeClient
-	v2DetailErr error
-	v2NSErr     error
-	v2RenewErr  error
-	v2Detail    map[string]any
-	lastRenewV2 godaddy.RenewV2Request
+	v2DetailErr       error
+	v2NSErr           error
+	v2RenewErr        error
+	v2Detail          map[string]any
+	lastRenewV2       godaddy.RenewV2Request
+	requireCustomerID string
+	v1RenewErr        error
 }
 
 func (f *fakeV2Client) ResolveCustomerID(ctx context.Context, shopperID string) (string, error) {
@@ -25,6 +29,9 @@ func (f *fakeV2Client) ResolveCustomerID(ctx context.Context, shopperID string) 
 func (f *fakeV2Client) DomainDetailV2(ctx context.Context, customerID, domain string, includes []string) (map[string]any, error) {
 	if f.v2DetailErr != nil {
 		return nil, f.v2DetailErr
+	}
+	if f.requireCustomerID != "" && customerID != f.requireCustomerID {
+		return nil, errors.New("customer mismatch")
 	}
 	if f.v2Detail != nil {
 		return f.v2Detail, nil
@@ -38,10 +45,20 @@ func (f *fakeV2Client) DomainDetailV1(ctx context.Context, domain string) (map[s
 
 func (f *fakeV2Client) RenewV2(ctx context.Context, customerID, domain string, req godaddy.RenewV2Request, idempotencyKey string) (godaddy.RenewResult, error) {
 	f.lastRenewV2 = req
+	if f.requireCustomerID != "" && customerID != f.requireCustomerID {
+		return godaddy.RenewResult{}, errors.New("customer mismatch")
+	}
 	if f.v2RenewErr != nil {
 		return godaddy.RenewResult{}, f.v2RenewErr
 	}
 	return godaddy.RenewResult{Domain: domain, Price: 12.99, Currency: "USD"}, nil
+}
+
+func (f *fakeV2Client) Renew(ctx context.Context, domain string, years int, idempotencyKey string) (godaddy.RenewResult, error) {
+	if f.v1RenewErr != nil {
+		return godaddy.RenewResult{}, f.v1RenewErr
+	}
+	return f.fakeClient.Renew(ctx, domain, years, idempotencyKey)
 }
 
 func (f *fakeV2Client) SetNameserversV2(ctx context.Context, customerID, domain string, nameservers []string) error {
@@ -171,5 +188,67 @@ func TestRenewFallsBackToV1WhenV2PayloadUnavailable(t *testing.T) {
 	}
 	if out["api_version"] != "v1" {
 		t.Fatalf("expected v1 fallback, got %v", out["api_version"])
+	}
+}
+
+func TestRenewV2FallsBackToShopperIDCustomerCandidate(t *testing.T) {
+	rt := makeRuntime(t)
+	rt.Cfg.CustomerID = "cust-uuid"
+	rt.Cfg.ShopperID = "660323812"
+	fc := &fakeV2Client{
+		requireCustomerID: "660323812",
+		v2Detail: map[string]any{
+			"domain":    "example.com",
+			"expiresAt": "2026-05-27T15:01:38.000Z",
+			"renewal": map[string]any{
+				"price":    float64(10990000),
+				"currency": "USD",
+			},
+		},
+	}
+	svc := New(rt, fc)
+
+	out, err := svc.Renew(context.Background(), "example.com", 1, false, true)
+	if err != nil {
+		t.Fatalf("renew via shopper-id fallback: %v", err)
+	}
+	if out["api_version"] != "v2" {
+		t.Fatalf("expected v2 renew path, got %v", out["api_version"])
+	}
+}
+
+func TestRenewReturnsLatestV1PaymentErrorAndGuidance(t *testing.T) {
+	rt := makeRuntime(t)
+	rt.Cfg.CustomerID = "cust-123"
+	rt.Cfg.ShopperID = "660323812"
+	svc := New(rt, &fakeV2Client{
+		v2RenewErr: errors.New("v2 not implemented"),
+		v2Detail: map[string]any{
+			"domain":    "example.com",
+			"expiresAt": "2026-05-27T15:01:38.000Z",
+			"renewal": map[string]any{
+				"price":    float64(10990000),
+				"currency": "USD",
+			},
+		},
+		v1RenewErr: &apperr.AppError{
+			Code:    apperr.CodeProvider,
+			Message: "provider returned non-success status",
+			Details: map[string]any{
+				"status": 402,
+				"provider": map[string]any{
+					"code":    "INVALID_PAYMENT_INFO",
+					"message": "Unable to authorize credit based on specified payment information",
+				},
+			},
+		},
+	})
+
+	_, err := svc.Renew(context.Background(), "example.com", 1, false, true)
+	if err == nil {
+		t.Fatalf("expected renew error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "good as gold") {
+		t.Fatalf("expected good as gold guidance, got: %v", err)
 	}
 }

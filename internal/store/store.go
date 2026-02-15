@@ -59,19 +59,10 @@ func tokensPath() (string, error) {
 }
 
 func AppendOperation(op Operation) error {
-	path, err := operationsPath()
-	if err != nil {
-		return err
-	}
-	path = filepath.Clean(path)
-	// #nosec G304 -- path is scoped to ~/.gdcli with fixed filename.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	return enc.Encode(op)
+	return LoadAndSaveOperations(func(ops *[]Operation) error {
+		*ops = append(*ops, op)
+		return nil
+	})
 }
 
 func ReadOperations() ([]Operation, error) {
@@ -103,6 +94,36 @@ func ReadOperations() ([]Operation, error) {
 		return nil, err
 	}
 	return ops, nil
+}
+
+func LoadAndSaveOperations(mutator func(*[]Operation) error) error {
+	path, err := operationsPath()
+	if err != nil {
+		return err
+	}
+	path = filepath.Clean(path)
+	// #nosec G304 -- path is scoped to ~/.gdcli with fixed filename.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := lockFile(f); err != nil {
+		return err
+	}
+	defer func() { _ = unlockFile(f) }()
+
+	ops, err := readOperationsFromFile(f)
+	if err != nil {
+		return err
+	}
+	if err := mutator(&ops); err != nil {
+		return err
+	}
+	if err := writeOperationsToFile(f, ops); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 func LoadTokens() (*TokenStore, error) {
@@ -187,4 +208,39 @@ func LoadAndSaveTokens(mutator func(*TokenStore) error) error {
 		return err
 	}
 	return f.Sync()
+}
+
+func readOperationsFromFile(f *os.File) ([]Operation, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	var ops []Operation
+	s := bufio.NewScanner(f)
+	for s.Scan() {
+		var op Operation
+		if err := json.Unmarshal(s.Bytes(), &op); err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+	}
+	if err := s.Err(); err != nil {
+		return nil, err
+	}
+	return ops, nil
+}
+
+func writeOperationsToFile(f *os.File, ops []Operation) error {
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	enc := json.NewEncoder(f)
+	for _, op := range ops {
+		if err := enc.Encode(op); err != nil {
+			return err
+		}
+	}
+	return nil
 }

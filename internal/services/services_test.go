@@ -87,6 +87,27 @@ func (f *fakeClient) SetRecords(ctx context.Context, domain string, records []go
 	return nil
 }
 
+type flakyPurchaseClient struct {
+	fakeClient
+	purchaseCalls int
+}
+
+func (f *flakyPurchaseClient) Purchase(ctx context.Context, domain string, years int, idempotencyKey string) (godaddy.PurchaseResult, error) {
+	f.purchaseCalls++
+	if f.purchaseCalls <= 3 {
+		return godaddy.PurchaseResult{}, io.ErrUnexpectedEOF
+	}
+	return godaddy.PurchaseResult{Domain: domain, Price: 12.99 * float64(years), Currency: "USD", OrderID: "order-2"}, nil
+}
+
+type eurRenewClient struct {
+	fakeClient
+}
+
+func (f *eurRenewClient) Renew(ctx context.Context, domain string, years int, idempotencyKey string) (godaddy.RenewResult, error) {
+	return godaddy.RenewResult{Domain: domain, Price: 12.99, Currency: "EUR", OrderID: "renew-eur"}, nil
+}
+
 func makeRuntime(t *testing.T) *app.Runtime {
 	t.Helper()
 	h := t.TempDir()
@@ -201,5 +222,41 @@ func TestAppendOperationWarningOnFailure(t *testing.T) {
 	got := errBuf.String()
 	if !strings.Contains(got, "warning: failed writing operation log for operation_id=op-fail") {
 		t.Fatalf("expected warning in stderr, got %q", got)
+	}
+}
+
+func TestPurchaseConfirmTokenReusableAfterTransientFailure(t *testing.T) {
+	rt := makeRuntime(t)
+	svc := New(rt, &flakyPurchaseClient{})
+
+	dry, err := svc.PurchaseDryRun(context.Background(), "example.com", 1)
+	if err != nil {
+		t.Fatalf("purchase dry run: %v", err)
+	}
+	tok, _ := dry["confirmation_token"].(string)
+	if tok == "" {
+		t.Fatalf("expected confirmation token")
+	}
+
+	if _, err := svc.PurchaseConfirm(context.Background(), "example.com", tok, 1); err == nil {
+		t.Fatalf("expected first confirm to fail")
+	}
+
+	res, err := svc.PurchaseConfirm(context.Background(), "example.com", tok, 1)
+	if err != nil {
+		t.Fatalf("expected retry with same token to succeed: %v", err)
+	}
+	if res.OrderID == "" {
+		t.Fatalf("expected order id on retry")
+	}
+}
+
+func TestRenewRejectsNonUSDProviderPrice(t *testing.T) {
+	rt := makeRuntime(t)
+	svc := New(rt, &eurRenewClient{})
+
+	_, err := svc.Renew(context.Background(), "example.com", 1, false, true)
+	if err == nil {
+		t.Fatalf("expected non-USD renew to fail budget policy")
 	}
 }

@@ -384,7 +384,7 @@ func runDomains(rt *app.Runtime, args []string) error {
 		flags := parseKVFlags(rest[1:])
 		years := parseIntDefault(flags["years"], 1)
 		dryRun := hasBoolFlag(rest[1:], "dry-run")
-		autoApprove := hasBoolFlag(rest[1:], "auto-approve")
+		autoApprove := hasBoolFlag(rest[1:], "auto-approve") || hasBoolFlag(rest[1:], "apply")
 		res, err := svc.Renew(rt.Ctx, domain, years, dryRun, autoApprove)
 		if err != nil {
 			emitError(rt, "domains renew", err)
@@ -407,7 +407,7 @@ func runDomains(rt *app.Runtime, args []string) error {
 		flags := parseKVFlags(rest[1:])
 		years := parseIntDefault(flags["years"], 1)
 		dryRun := hasBoolFlag(rest[1:], "dry-run")
-		autoApprove := hasBoolFlag(rest[1:], "auto-approve")
+		autoApprove := hasBoolFlag(rest[1:], "auto-approve") || hasBoolFlag(rest[1:], "apply")
 		results := make([]any, 0, len(domains))
 		failed := 0
 		for i, d := range domains {
