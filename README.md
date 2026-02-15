@@ -4,9 +4,23 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/sportwhiz/gdcli/release.yml?branch=main)](https://github.com/sportwhiz/gdcli/actions)
 [![Homebrew Tap](https://img.shields.io/badge/homebrew-sportwhiz%2Ftap-blue)](https://github.com/sportwhiz/homebrew-tap)
 
-GoDaddy-focused, agent-friendly domain investor CLI.
+> **Unofficial project:** `gdcli` is an independent, community-built CLI and is **not** an official GoDaddy product. It is not created, maintained, or endorsed by GoDaddy.
 
-`gdcli` is JSON-first, safe-by-default for purchases, and built for automation tools like OpenClaw.
+## Description
+
+`gdcli` is a fast, script-friendly CLI for GoDaddy domain workflows: discovery, purchases, renewals, DNS operations, and account visibility. It is JSON-first, safe-by-default for financial actions, and designed for automation tools like OpenClaw.
+
+## Features
+
+- **Domain discovery** - suggestions and availability checks (`suggest`, `avail`, `avail-bulk`)
+- **Safe purchases** - token-confirm purchase flow by default before final buy
+- **Optional auto mode** - auto-purchase only after explicit non-refund acknowledgment
+- **Budget controls** - enforce `max_price_per_domain`, `max_daily_spend`, and `max_domains_per_day`
+- **Lifecycle operations** - renewals, transfers, redemption, detail and action history
+- **DNS operations** - portfolio audit and template application with dry-run-first behavior
+- **Account visibility** - orders, subscriptions, shopper/customer identity resolution
+- **Automation output** - parseable `--json`/`--ndjson`, logs on `stderr`
+- **v1/v2 routing** - customer-scoped v2 paths where available with fallback behavior
 
 ## Documentation
 
@@ -17,7 +31,7 @@ GoDaddy-focused, agent-friendly domain investor CLI.
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/openclaw-setup.md`](docs/openclaw-setup.md)
 
-## Install
+## Installation
 
 ### Homebrew
 
@@ -43,6 +57,11 @@ Verify:
 gdcli help --json
 ```
 
+Run:
+
+- `gdcli help --json` for top-level groups and usage.
+- `gdcli <group> --help` for subcommand details.
+
 Check installed version and update status:
 
 ```bash
@@ -55,9 +74,9 @@ If you are using OpenClaw, also complete skill setup:
 
 - [`docs/openclaw-setup.md`](docs/openclaw-setup.md)
 
-## 5-Minute Setup
+## Quick Start
 
-1. Set credentials.
+### 1. Set Credentials
 
 ```bash
 export GODADDY_API_KEY="your_key"
@@ -67,14 +86,14 @@ export GDCLI_SHOPPER_ID="<YOUR_SHOPPER_ID>"
 
 Use placeholders in shared docs/snippets. Do not publish real shopper IDs.
 
-2. Verify config and auth.
+### 2. Verify Configuration and Auth
 
 ```bash
 gdcli settings show --json
 gdcli domains avail example.com --json
 ```
 
-3. Safe purchase flow (default).
+### 3. Run a Safe Purchase Flow (Default)
 
 ```bash
 gdcli domains purchase example.com --json
@@ -82,7 +101,7 @@ gdcli domains purchase example.com --json
 gdcli domains purchase example.com --confirm <TOKEN> --json
 ```
 
-Bootstrap with guided init:
+### 4. Optional Guided Bootstrap
 
 ```bash
 gdcli init --api-environment prod --resolve-customer-id --max-price 25 --max-daily-spend 100 --max-domains-per-day 5 --verify --json
@@ -94,27 +113,94 @@ Confirm identity was stored for v2 customer-scoped calls:
 gdcli account identity show --json
 ```
 
-## Safety Model
+## Technical Model
 
-- Purchases default to dry-run style with confirmation token.
-- Auto-purchase is disabled by default.
-- Auto-purchase requires explicit non-refund acknowledgment.
-- Budget caps are enforced before financial operations.
+### Identity and API Routing
 
-Enable auto mode:
+`gdcli` supports both legacy and customer-scoped GoDaddy flows:
+
+- v1-style operations run with API key/secret credentials.
+- v2 customer-scoped operations require a `customer_id`.
+- `customer_id` can be set directly (`GDCLI_CUSTOMER_ID`), stored in config, or resolved from `shopper_id`.
+- Resolution metadata is persisted (`customer_id_resolved_at`, `customer_id_source`) for auditability.
+
+Routing behavior is capability-aware:
+
+- If a command has a customer-scoped v2 path and `customer_id` is available, `gdcli` attempts v2.
+- If v2 prerequisites are missing or unsupported for that command/account state, it falls back to compatible behavior.
+- Identity state is inspectable via `gdcli account identity show --json`.
+
+### Credentials and Configuration Precedence
+
+Runtime credential lookup:
+
+1. `GODADDY_API_KEY` + `GODADDY_API_SECRET` from environment.
+2. macOS Keychain fallback (`service=gdcli`, accounts `godaddy_api_key` / `godaddy_api_secret`).
+3. If neither is available, command fails with `auth_error` (`exit 3`).
+
+Identity override precedence:
+
+1. Environment (`GDCLI_SHOPPER_ID`, `GDCLI_CUSTOMER_ID`).
+2. Stored config (`~/.gdcli/config.json`).
+3. Resolved identity persisted by `account identity resolve`.
+
+API base URL precedence:
+
+1. `GDCLI_BASE_URL` (testing/override).
+2. `api_environment=ote` -> `https://api.ote-godaddy.com`.
+3. Default production -> `https://api.godaddy.com`.
+
+### Safety and Financial Controls
+
+Financial actions are guarded by multiple layers:
+
+- Confirmation-token flow by default for purchases (`domains purchase` then `--confirm <TOKEN>`).
+- Explicit opt-in gate for auto-purchase (`settings auto-purchase enable --ack ...`).
+- Budget enforcement before provider calls:
+  - `max_price_per_domain`
+  - `max_daily_spend`
+  - `max_domains_per_day`
+- Operation-level idempotency to reduce accidental duplicate financial actions.
+- In `prod`, purchase/renew commands emit a warning to `stderr` before execution.
+
+For batch operations, `gdcli` can return partial failures (`exit 9`) while preserving per-item result details.
+
+### DNS Execution Model
+
+DNS operations are built for controlled rollouts:
+
+- `dns audit` evaluates portfolio domains and reports issues per domain.
+- `dns apply` supports known templates (`afternic-nameservers`, `parking`) and custom JSON templates.
+- Dry-run-first behavior is supported so agents can validate intent before mutation.
+- Bulk domain input is file-based to make execution explicit and reproducible.
+
+### Output Contract for Automation
+
+`gdcli` is designed for machines first:
+
+- `stdout` is reserved for JSON/NDJSON payloads.
+- `stderr` is reserved for warnings, logs, and operational notices.
+- Non-zero exit codes are stable and categorized (`auth`, `budget`, `confirmation`, `policy`, `partial`, etc.).
+- NDJSON mode is suitable for large/batch jobs where per-line streaming is preferred.
+- JSON output is wrapped in a stable envelope (`command`, `timestamp_utc`, `request_id`, `result`, `error`).
+
+Reliable scripting pattern:
 
 ```bash
-gdcli settings auto-purchase enable --ack "I UNDERSTAND PURCHASES ARE FINAL" --json
+gdcli domains avail example.com --json | jq -r '.result.available'
 ```
 
-## Output Model
+Batch-friendly pattern:
 
-- `stdout`: structured JSON/NDJSON only.
-- `stderr`: logs and warnings.
-- Global flags:
-  - `--json` (default)
-  - `--ndjson`
-  - `--quiet`
+```bash
+gdcli domains avail-bulk /tmp/domains.txt --ndjson | jq -c '.result'
+```
+
+## Global Flags
+
+- `--json` (default output mode)
+- `--ndjson` (stream records as newline-delimited envelopes where supported)
+- `--quiet` (suppress non-essential warnings/notices on `stderr`)
 
 ## Upgrading
 
@@ -368,8 +454,10 @@ Required setup:
 Release:
 
 ```bash
-git tag v0.1.3
-git push origin v0.1.3
+git checkout main
+git pull --ff-only origin main
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 This publishes binaries/checksums to GitHub Releases and updates `Formula/gdcli.rb` in the tap repo.
