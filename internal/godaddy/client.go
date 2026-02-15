@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,10 +43,13 @@ type Suggestion struct {
 }
 
 type Availability struct {
-	Domain    string  `json:"domain"`
-	Available bool    `json:"available"`
-	Price     float64 `json:"price,omitempty"`
-	Currency  string  `json:"currency,omitempty"`
+	Domain     string  `json:"domain"`
+	Available  bool    `json:"available"`
+	Definitive bool    `json:"definitive,omitempty"`
+	Price      float64 `json:"price,omitempty"`
+	Currency   string  `json:"currency,omitempty"`
+	PriceRaw   float64 `json:"price_raw,omitempty"`
+	PriceUnit  string  `json:"price_unit,omitempty"`
 }
 
 type PurchaseResult struct {
@@ -132,21 +137,118 @@ func (c *HTTPClient) Suggest(ctx context.Context, query string, tlds []string, l
 func (c *HTTPClient) Available(ctx context.Context, domain string) (Availability, error) {
 	q := url.Values{}
 	q.Set("domain", domain)
-	q.Set("checkType", "FAST")
-	var out Availability
-	if err := c.do(ctx, http.MethodGet, "/v1/domains/available?"+q.Encode(), nil, &out, ""); err != nil {
+	// FULL provides a definitive answer for single lookups and avoids FAST-mode ambiguity.
+	q.Set("checkType", "FULL")
+	var raw availabilityAPI
+	if err := c.do(ctx, http.MethodGet, "/v1/domains/available?"+q.Encode(), nil, &raw, ""); err != nil {
 		return Availability{}, err
 	}
-	return out, nil
+	return normalizeAvailability(raw), nil
 }
 
 func (c *HTTPClient) AvailableBulk(ctx context.Context, domains []string) ([]Availability, error) {
 	body := map[string]any{"domains": domains, "checkType": "FAST"}
-	var out []Availability
-	if err := c.do(ctx, http.MethodPost, "/v1/domains/available", body, &out, ""); err != nil {
+	var raw []availabilityAPI
+	if err := c.do(ctx, http.MethodPost, "/v1/domains/available", body, &raw, ""); err != nil {
 		return nil, err
 	}
+	out := make([]Availability, 0, len(raw))
+	for _, item := range raw {
+		out = append(out, normalizeAvailability(item))
+	}
 	return out, nil
+}
+
+type availabilityAPI struct {
+	Domain     string      `json:"domain"`
+	Available  bool        `json:"available"`
+	Definitive bool        `json:"definitive,omitempty"`
+	Price      interface{} `json:"price,omitempty"`
+	Currency   string      `json:"currency,omitempty"`
+}
+
+func normalizeAvailability(in availabilityAPI) Availability {
+	out := Availability{
+		Domain:     in.Domain,
+		Available:  in.Available,
+		Definitive: in.Definitive,
+		Currency:   in.Currency,
+	}
+	price, raw, unit := normalizeProviderPrice(in.Price)
+	out.Price = price
+	out.PriceRaw = raw
+	out.PriceUnit = unit
+	return out
+}
+
+// GoDaddy availability pricing is commonly reported in micro-units.
+// We normalize to USD in `Price` and preserve provider value/unit for auditing.
+func normalizeProviderPrice(v interface{}) (price float64, raw float64, unit string) {
+	const micros = 1_000_000.0
+	switch x := v.(type) {
+	case nil:
+		return 0, 0, ""
+	case float64:
+		raw = x
+		if isWholeNumber(x) && x >= micros {
+			return x / micros, x, "micros"
+		}
+		return x, x, "usd"
+	case float32:
+		f := float64(x)
+		raw = f
+		if isWholeNumber(f) && f >= micros {
+			return f / micros, f, "micros"
+		}
+		return f, f, "usd"
+	case int:
+		f := float64(x)
+		if f >= micros {
+			return f / micros, f, "micros"
+		}
+		return f, f, "usd"
+	case int64:
+		f := float64(x)
+		if f >= micros {
+			return f / micros, f, "micros"
+		}
+		return f, f, "usd"
+	case json.Number:
+		if i, err := x.Int64(); err == nil {
+			f := float64(i)
+			if f >= micros {
+				return f / micros, f, "micros"
+			}
+			return f, f, "usd"
+		}
+		if f, err := x.Float64(); err == nil {
+			if isWholeNumber(f) && f >= micros {
+				return f / micros, f, "micros"
+			}
+			return f, f, "usd"
+		}
+	case string:
+		if s := strings.TrimSpace(x); s != "" {
+			if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+				f := float64(i)
+				if f >= micros {
+					return f / micros, f, "micros"
+				}
+				return f, f, "usd"
+			}
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				if isWholeNumber(f) && f >= micros {
+					return f / micros, f, "micros"
+				}
+				return f, f, "usd"
+			}
+		}
+	}
+	return 0, 0, ""
+}
+
+func isWholeNumber(v float64) bool {
+	return math.Abs(v-math.Round(v)) < 1e-9
 }
 
 func (c *HTTPClient) Purchase(ctx context.Context, domain string, years int, idempotencyKey string) (PurchaseResult, error) {
