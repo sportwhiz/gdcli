@@ -87,6 +87,20 @@ type RenewResult struct {
 	OrderID  string  `json:"order_id,omitempty"`
 }
 
+type RenewV2Consent struct {
+	Price                  int64  `json:"price"`
+	Currency               string `json:"currency"`
+	AgreedBy               string `json:"agreedBy"`
+	AgreedAt               string `json:"agreedAt"`
+	RegistryPremiumPricing bool   `json:"registryPremiumPricing,omitempty"`
+}
+
+type RenewV2Request struct {
+	Expires string         `json:"expires"`
+	Consent RenewV2Consent `json:"consent"`
+	Period  int            `json:"period,omitempty"`
+}
+
 type PortfolioDomain struct {
 	Domain  string `json:"domain"`
 	Expires string `json:"expires"`
@@ -571,9 +585,15 @@ func (c *HTTPClient) DomainDetailV1(ctx context.Context, domain string) (map[str
 	return out, nil
 }
 
-func (c *HTTPClient) RenewV2(ctx context.Context, customerID, domain string, years int, idempotencyKey string) (RenewResult, error) {
+func (c *HTTPClient) RenewV2(ctx context.Context, customerID, domain string, req RenewV2Request, idempotencyKey string) (RenewResult, error) {
 	path := "/v2/customers/" + url.PathEscape(customerID) + "/domains/" + url.PathEscape(domain) + "/renew"
-	body := map[string]any{"period": years}
+	body := map[string]any{
+		"expires": req.Expires,
+		"consent": req.Consent,
+	}
+	if req.Period > 0 {
+		body["period"] = req.Period
+	}
 	var out struct {
 		Price    interface{} `json:"price"`
 		Currency string      `json:"currency"`
