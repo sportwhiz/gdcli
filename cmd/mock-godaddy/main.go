@@ -150,6 +150,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/domains/suggest", s.handleSuggest)
 	mux.HandleFunc("/v1/domains/available", s.handleAvailable)
+	mux.HandleFunc("/v1/domains/agreements", s.handleAgreements)
 	mux.HandleFunc("/v1/domains/purchase", s.handlePurchase)
 	mux.HandleFunc("/v1/domains", s.handleDomains)
 	mux.HandleFunc("/v1/domains/", s.handleDomainSub)
@@ -322,17 +323,36 @@ func (s *state) handleAvailable(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *state) handleAgreements(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"message": "method not allowed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, []map[string]any{
+		{"agreementKey": "DNRA", "title": "Domain Name Registration Agreement", "url": "https://example.test/dnra", "content": "mock agreement body"},
+	})
+}
+
 func (s *state) handlePurchase(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"message": "method not allowed"})
 		return
 	}
 	var req struct {
-		Domain string `json:"domain"`
-		Period int    `json:"period"`
+		Domain  string `json:"domain"`
+		Period  int    `json:"period"`
+		Consent struct {
+			AgreementKeys []string `json:"agreementKeys"`
+			AgreedBy      string   `json:"agreedBy"`
+			AgreedAt      string   `json:"agreedAt"`
+		} `json:"consent"`
 	}
 	if err := decodeJSONBody(w, r, &req); err != nil {
 		writeDecodeErr(w, err)
+		return
+	}
+	if len(req.Consent.AgreementKeys) == 0 || req.Consent.AgreedBy == "" || req.Consent.AgreedAt == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"code": "UNPROCESSABLE_ENTITY", "message": "body.consent must include agreementKeys, agreedBy, and agreedAt"})
 		return
 	}
 	if req.Period <= 0 {

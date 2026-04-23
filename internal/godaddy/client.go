@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -85,6 +86,19 @@ type RenewResult struct {
 	Price    float64 `json:"price"`
 	Currency string  `json:"currency"`
 	OrderID  string  `json:"order_id,omitempty"`
+}
+
+type Agreement struct {
+	AgreementKey string `json:"agreementKey"`
+	Title        string `json:"title,omitempty"`
+	URL          string `json:"url,omitempty"`
+	Content      string `json:"content,omitempty"`
+}
+
+type PurchaseConsent struct {
+	AgreementKeys []string `json:"agreementKeys"`
+	AgreedBy      string   `json:"agreedBy"`
+	AgreedAt      string   `json:"agreedAt"`
 }
 
 type RenewV2Consent struct {
@@ -344,13 +358,83 @@ func isWholeNumber(v float64) bool {
 	return math.Abs(v-math.Round(v)) < 1e-9
 }
 
+func (c *HTTPClient) Agreements(ctx context.Context, tlds []string, privacy bool) ([]Agreement, error) {
+	q := url.Values{}
+	q.Set("tlds", strings.Join(tlds, ","))
+	q.Set("privacy", strconv.FormatBool(privacy))
+	var out []Agreement
+	if err := c.do(ctx, http.MethodGet, "/v1/domains/agreements?"+q.Encode(), nil, &out, ""); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *HTTPClient) Purchase(ctx context.Context, domain string, years int, idempotencyKey string) (PurchaseResult, error) {
-	body := map[string]any{"domain": domain, "period": years}
+	tld := tldFromDomain(domain)
+	if tld == "" {
+		return PurchaseResult{}, &apperr.AppError{Code: apperr.CodeValidation, Message: "domain has no TLD", Details: map[string]any{"domain": domain}}
+	}
+	agreements, err := c.Agreements(ctx, []string{tld}, false)
+	if err != nil {
+		return PurchaseResult{}, fmt.Errorf("fetch consent agreements: %w", err)
+	}
+	keys := make([]string, 0, len(agreements))
+	for _, a := range agreements {
+		if a.AgreementKey != "" {
+			keys = append(keys, a.AgreementKey)
+		}
+	}
+	if len(keys) == 0 {
+		return PurchaseResult{}, &apperr.AppError{Code: apperr.CodeInternal, Message: "registrar returned no consent agreements", Details: map[string]any{"tld": tld}}
+	}
+	body := map[string]any{
+		"domain": domain,
+		"period": years,
+		"consent": PurchaseConsent{
+			AgreementKeys: keys,
+			AgreedBy:      consentAgreedBy(),
+			AgreedAt:      time.Now().UTC().Format(time.RFC3339),
+		},
+	}
 	var out PurchaseResult
 	if err := c.do(ctx, http.MethodPost, "/v1/domains/purchase", body, &out, idempotencyKey); err != nil {
 		return PurchaseResult{}, err
 	}
 	return out, nil
+}
+
+func tldFromDomain(domain string) string {
+	d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if d == "" {
+		return ""
+	}
+	parts := strings.Split(d, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[len(parts)-1]
+}
+
+func consentAgreedBy() string {
+	if v := strings.TrimSpace(os.Getenv("GDCLI_CONSENT_AGREED_BY")); v != "" {
+		return v
+	}
+	if ip := detectOutboundIP(); ip != "" {
+		return ip
+	}
+	return "gdcli"
+}
+
+func detectOutboundIP() string {
+	conn, err := net.Dial("udp", "1.1.1.1:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return addr.IP.String()
+	}
+	return ""
 }
 
 func (c *HTTPClient) Renew(ctx context.Context, domain string, years int, idempotencyKey string) (RenewResult, error) {
