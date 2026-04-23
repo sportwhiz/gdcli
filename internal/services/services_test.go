@@ -33,8 +33,11 @@ func (f *fakeClient) AvailableBulk(ctx context.Context, domains []string) ([]god
 	}
 	return out, nil
 }
-func (f *fakeClient) Purchase(ctx context.Context, domain string, years int, idempotencyKey string) (godaddy.PurchaseResult, error) {
-	return godaddy.PurchaseResult{Domain: domain, Price: 12.99 * float64(years), Currency: "USD", OrderID: "order-1"}, nil
+func (f *fakeClient) Agreements(ctx context.Context, tlds []string, privacy bool) ([]godaddy.Agreement, error) {
+	return []godaddy.Agreement{{AgreementKey: "DNRA"}}, nil
+}
+func (f *fakeClient) Purchase(ctx context.Context, req godaddy.PurchaseRequest) (godaddy.PurchaseResult, error) {
+	return godaddy.PurchaseResult{Domain: req.Domain, Price: 12.99 * float64(req.Period), Currency: "USD", OrderID: "order-1"}, nil
 }
 func (f *fakeClient) Renew(ctx context.Context, domain string, years int, idempotencyKey string) (godaddy.RenewResult, error) {
 	return godaddy.RenewResult{Domain: domain, Price: 12.99, Currency: "USD", OrderID: "renew-1"}, nil
@@ -92,12 +95,12 @@ type flakyPurchaseClient struct {
 	purchaseCalls int
 }
 
-func (f *flakyPurchaseClient) Purchase(ctx context.Context, domain string, years int, idempotencyKey string) (godaddy.PurchaseResult, error) {
+func (f *flakyPurchaseClient) Purchase(ctx context.Context, req godaddy.PurchaseRequest) (godaddy.PurchaseResult, error) {
 	f.purchaseCalls++
 	if f.purchaseCalls <= 3 {
 		return godaddy.PurchaseResult{}, io.ErrUnexpectedEOF
 	}
-	return godaddy.PurchaseResult{Domain: domain, Price: 12.99 * float64(years), Currency: "USD", OrderID: "order-2"}, nil
+	return godaddy.PurchaseResult{Domain: req.Domain, Price: 12.99 * float64(req.Period), Currency: "USD", OrderID: "order-2"}, nil
 }
 
 type eurRenewClient struct {

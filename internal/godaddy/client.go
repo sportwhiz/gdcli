@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -22,7 +21,8 @@ type Client interface {
 	Suggest(ctx context.Context, query string, tlds []string, limit int) ([]Suggestion, error)
 	Available(ctx context.Context, domain string) (Availability, error)
 	AvailableBulk(ctx context.Context, domains []string) ([]Availability, error)
-	Purchase(ctx context.Context, domain string, years int, idempotencyKey string) (PurchaseResult, error)
+	Agreements(ctx context.Context, tlds []string, privacy bool) ([]Agreement, error)
+	Purchase(ctx context.Context, req PurchaseRequest) (PurchaseResult, error)
 	Renew(ctx context.Context, domain string, years int, idempotencyKey string) (RenewResult, error)
 	ListDomains(ctx context.Context) ([]PortfolioDomain, error)
 	ListOrders(ctx context.Context, limit, offset int) (OrdersPage, error)
@@ -99,6 +99,16 @@ type PurchaseConsent struct {
 	AgreementKeys []string `json:"agreementKeys"`
 	AgreedBy      string   `json:"agreedBy"`
 	AgreedAt      string   `json:"agreedAt"`
+}
+
+type PurchaseRequest struct {
+	Domain         string
+	Period         int
+	Privacy        bool
+	RenewAuto      bool
+	NameServers    []string
+	Consent        PurchaseConsent
+	IdempotencyKey string
 }
 
 type RenewV2Consent struct {
@@ -369,72 +379,32 @@ func (c *HTTPClient) Agreements(ctx context.Context, tlds []string, privacy bool
 	return out, nil
 }
 
-func (c *HTTPClient) Purchase(ctx context.Context, domain string, years int, idempotencyKey string) (PurchaseResult, error) {
-	tld := tldFromDomain(domain)
-	if tld == "" {
-		return PurchaseResult{}, &apperr.AppError{Code: apperr.CodeValidation, Message: "domain has no TLD", Details: map[string]any{"domain": domain}}
+func (c *HTTPClient) Purchase(ctx context.Context, req PurchaseRequest) (PurchaseResult, error) {
+	if req.Domain == "" {
+		return PurchaseResult{}, &apperr.AppError{Code: apperr.CodeValidation, Message: "domain is required"}
 	}
-	agreements, err := c.Agreements(ctx, []string{tld}, false)
-	if err != nil {
-		return PurchaseResult{}, fmt.Errorf("fetch consent agreements: %w", err)
-	}
-	keys := make([]string, 0, len(agreements))
-	for _, a := range agreements {
-		if a.AgreementKey != "" {
-			keys = append(keys, a.AgreementKey)
-		}
-	}
-	if len(keys) == 0 {
-		return PurchaseResult{}, &apperr.AppError{Code: apperr.CodeInternal, Message: "registrar returned no consent agreements", Details: map[string]any{"tld": tld}}
+	if len(req.Consent.AgreementKeys) == 0 || req.Consent.AgreedBy == "" || req.Consent.AgreedAt == "" {
+		return PurchaseResult{}, &apperr.AppError{Code: apperr.CodeValidation, Message: "consent.agreementKeys, agreedBy, and agreedAt are required"}
 	}
 	body := map[string]any{
-		"domain": domain,
-		"period": years,
-		"consent": PurchaseConsent{
-			AgreementKeys: keys,
-			AgreedBy:      consentAgreedBy(),
-			AgreedAt:      time.Now().UTC().Format(time.RFC3339),
-		},
+		"domain":  req.Domain,
+		"period":  req.Period,
+		"consent": req.Consent,
+	}
+	if req.Privacy {
+		body["privacy"] = true
+	}
+	if req.RenewAuto {
+		body["renewAuto"] = true
+	}
+	if len(req.NameServers) > 0 {
+		body["nameServers"] = req.NameServers
 	}
 	var out PurchaseResult
-	if err := c.do(ctx, http.MethodPost, "/v1/domains/purchase", body, &out, idempotencyKey); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/v1/domains/purchase", body, &out, req.IdempotencyKey); err != nil {
 		return PurchaseResult{}, err
 	}
 	return out, nil
-}
-
-func tldFromDomain(domain string) string {
-	d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
-	if d == "" {
-		return ""
-	}
-	parts := strings.Split(d, ".")
-	if len(parts) < 2 {
-		return ""
-	}
-	return parts[len(parts)-1]
-}
-
-func consentAgreedBy() string {
-	if v := strings.TrimSpace(os.Getenv("GDCLI_CONSENT_AGREED_BY")); v != "" {
-		return v
-	}
-	if ip := detectOutboundIP(); ip != "" {
-		return ip
-	}
-	return "gdcli"
-}
-
-func detectOutboundIP() string {
-	conn, err := net.Dial("udp", "1.1.1.1:80")
-	if err != nil {
-		return ""
-	}
-	defer conn.Close()
-	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
-		return addr.IP.String()
-	}
-	return ""
 }
 
 func (c *HTTPClient) Renew(ctx context.Context, domain string, years int, idempotencyKey string) (RenewResult, error) {

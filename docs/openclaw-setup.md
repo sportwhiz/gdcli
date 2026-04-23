@@ -23,6 +23,15 @@ Optional test-only override:
 export GDCLI_BASE_URL=http://localhost:8787
 ```
 
+Optional consent identifier (used as the `agreedBy` field when registering
+domains; defaults to the detected local outbound IP):
+
+```bash
+export GDCLI_CONSENT_AGREED_BY="203.0.113.9"   # e.g. the end user's real IP
+```
+
+See `docs/config.md` for details.
+
 ## 3. Verify CLI availability
 
 ```bash
