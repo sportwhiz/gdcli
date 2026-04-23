@@ -2,9 +2,12 @@ package godaddy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -179,6 +182,96 @@ func TestDoAllowsLargeBulkResponseUnderBulkCap(t *testing.T) {
 	}
 	if len(out) != 1 {
 		t.Fatalf("expected one item")
+	}
+}
+
+func TestPurchaseSendsCompleteBodyShape(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/domains/purchase" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"domain":"example.com","price":12.99,"currency":"USD","order_id":"o1"}`))
+	}))
+	defer srv.Close()
+
+	c, err := NewHTTPClient(srv.URL, "k", "s")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	req := PurchaseRequest{
+		Domain:  "example.com",
+		Period:  2,
+		Privacy: true,
+		Consent: PurchaseConsent{
+			AgreementKeys: []string{"DNRA"},
+			AgreedBy:      "203.0.113.9",
+			AgreedAt:      "2026-04-23T10:18:00Z",
+		},
+		IdempotencyKey: "op-1",
+	}
+	if _, err := c.Purchase(context.Background(), req); err != nil {
+		t.Fatalf("purchase: %v", err)
+	}
+	if got["domain"] != "example.com" || got["period"].(float64) != 2 || got["privacy"] != true {
+		t.Fatalf("unexpected body: %#v", got)
+	}
+	consent, ok := got["consent"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing consent block in body: %#v", got)
+	}
+	wantKeys := []any{"DNRA"}
+	if !reflect.DeepEqual(consent["agreementKeys"], wantKeys) {
+		t.Fatalf("agreementKeys: got %v want %v", consent["agreementKeys"], wantKeys)
+	}
+	if consent["agreedBy"] != "203.0.113.9" || consent["agreedAt"] != "2026-04-23T10:18:00Z" {
+		t.Fatalf("consent values: %#v", consent)
+	}
+}
+
+func TestPurchaseRejectsEmptyConsent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("should not hit server without consent; got %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c, err := NewHTTPClient(srv.URL, "k", "s")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if _, err := c.Purchase(context.Background(), PurchaseRequest{Domain: "example.com", Period: 1}); err == nil {
+		t.Fatalf("expected validation error for missing consent")
+	}
+}
+
+func TestAgreementsQueryIncludesPrivacyFlag(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/domains/agreements" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"agreementKey":"DNRA"},{"agreementKey":"DNPA"}]`))
+	}))
+	defer srv.Close()
+
+	c, err := NewHTTPClient(srv.URL, "k", "s")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	out, err := c.Agreements(context.Background(), []string{"com"}, true)
+	if err != nil {
+		t.Fatalf("agreements: %v", err)
+	}
+	if !strings.Contains(gotQuery, "privacy=true") || !strings.Contains(gotQuery, "tlds=com") {
+		t.Fatalf("expected privacy=true and tlds=com in query, got %q", gotQuery)
+	}
+	if len(out) != 2 || out[0].AgreementKey != "DNRA" || out[1].AgreementKey != "DNPA" {
+		t.Fatalf("unexpected agreements: %#v", out)
 	}
 }
 

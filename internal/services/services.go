@@ -627,12 +627,25 @@ func (s *Service) PurchaseConfirm(ctx context.Context, domain, token string, yea
 		return godaddy.PurchaseResult{Domain: domain, Price: tok.QuotedPrice, Currency: tok.Currency, AlreadyBought: true}, nil
 	}
 
+	privacy := false
+	consent, err := s.buildPurchaseConsent(ctx, domain, privacy)
+	if err != nil {
+		_ = s.finalizeOperation(tok.OperationKey, tok.QuotedPrice, tok.Currency, "failed")
+		return godaddy.PurchaseResult{}, err
+	}
+
 	var result godaddy.PurchaseResult
 	err = rate.Retry(ctx, 3, func() (bool, error) {
 		if err := s.RT.Limiter.Wait(ctx); err != nil {
 			return false, err
 		}
-		r, err := s.Client.Purchase(ctx, domain, years, tok.OperationKey)
+		r, err := s.Client.Purchase(ctx, godaddy.PurchaseRequest{
+			Domain:         domain,
+			Period:         years,
+			Privacy:        privacy,
+			Consent:        consent,
+			IdempotencyKey: tok.OperationKey,
+		})
 		result = r
 		if err == nil {
 			return false, nil
@@ -687,12 +700,24 @@ func (s *Service) PurchaseAuto(ctx context.Context, domain string, years int) (g
 	if already {
 		return godaddy.PurchaseResult{Domain: domain, Price: avail.Price, Currency: avail.Currency, AlreadyBought: true}, nil
 	}
+	privacy := false
+	consent, err := s.buildPurchaseConsent(ctx, domain, privacy)
+	if err != nil {
+		_ = s.finalizeOperation(opKey, avail.Price, avail.Currency, "failed")
+		return godaddy.PurchaseResult{}, err
+	}
 	var result godaddy.PurchaseResult
 	err = rate.Retry(ctx, 3, func() (bool, error) {
 		if err := s.RT.Limiter.Wait(ctx); err != nil {
 			return false, err
 		}
-		r, err := s.Client.Purchase(ctx, domain, years, opKey)
+		r, err := s.Client.Purchase(ctx, godaddy.PurchaseRequest{
+			Domain:         domain,
+			Period:         years,
+			Privacy:        privacy,
+			Consent:        consent,
+			IdempotencyKey: opKey,
+		})
 		result = r
 		if err == nil {
 			return false, nil

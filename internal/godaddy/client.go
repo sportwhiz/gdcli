@@ -21,7 +21,8 @@ type Client interface {
 	Suggest(ctx context.Context, query string, tlds []string, limit int) ([]Suggestion, error)
 	Available(ctx context.Context, domain string) (Availability, error)
 	AvailableBulk(ctx context.Context, domains []string) ([]Availability, error)
-	Purchase(ctx context.Context, domain string, years int, idempotencyKey string) (PurchaseResult, error)
+	Agreements(ctx context.Context, tlds []string, privacy bool) ([]Agreement, error)
+	Purchase(ctx context.Context, req PurchaseRequest) (PurchaseResult, error)
 	Renew(ctx context.Context, domain string, years int, idempotencyKey string) (RenewResult, error)
 	ListDomains(ctx context.Context) ([]PortfolioDomain, error)
 	ListOrders(ctx context.Context, limit, offset int) (OrdersPage, error)
@@ -85,6 +86,29 @@ type RenewResult struct {
 	Price    float64 `json:"price"`
 	Currency string  `json:"currency"`
 	OrderID  string  `json:"order_id,omitempty"`
+}
+
+type Agreement struct {
+	AgreementKey string `json:"agreementKey"`
+	Title        string `json:"title,omitempty"`
+	URL          string `json:"url,omitempty"`
+	Content      string `json:"content,omitempty"`
+}
+
+type PurchaseConsent struct {
+	AgreementKeys []string `json:"agreementKeys"`
+	AgreedBy      string   `json:"agreedBy"`
+	AgreedAt      string   `json:"agreedAt"`
+}
+
+type PurchaseRequest struct {
+	Domain         string
+	Period         int
+	Privacy        bool
+	RenewAuto      bool
+	NameServers    []string
+	Consent        PurchaseConsent
+	IdempotencyKey string
 }
 
 type RenewV2Consent struct {
@@ -344,10 +368,40 @@ func isWholeNumber(v float64) bool {
 	return math.Abs(v-math.Round(v)) < 1e-9
 }
 
-func (c *HTTPClient) Purchase(ctx context.Context, domain string, years int, idempotencyKey string) (PurchaseResult, error) {
-	body := map[string]any{"domain": domain, "period": years}
+func (c *HTTPClient) Agreements(ctx context.Context, tlds []string, privacy bool) ([]Agreement, error) {
+	q := url.Values{}
+	q.Set("tlds", strings.Join(tlds, ","))
+	q.Set("privacy", strconv.FormatBool(privacy))
+	var out []Agreement
+	if err := c.do(ctx, http.MethodGet, "/v1/domains/agreements?"+q.Encode(), nil, &out, ""); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *HTTPClient) Purchase(ctx context.Context, req PurchaseRequest) (PurchaseResult, error) {
+	if req.Domain == "" {
+		return PurchaseResult{}, &apperr.AppError{Code: apperr.CodeValidation, Message: "domain is required"}
+	}
+	if len(req.Consent.AgreementKeys) == 0 || req.Consent.AgreedBy == "" || req.Consent.AgreedAt == "" {
+		return PurchaseResult{}, &apperr.AppError{Code: apperr.CodeValidation, Message: "consent.agreementKeys, agreedBy, and agreedAt are required"}
+	}
+	body := map[string]any{
+		"domain":  req.Domain,
+		"period":  req.Period,
+		"consent": req.Consent,
+	}
+	if req.Privacy {
+		body["privacy"] = true
+	}
+	if req.RenewAuto {
+		body["renewAuto"] = true
+	}
+	if len(req.NameServers) > 0 {
+		body["nameServers"] = req.NameServers
+	}
 	var out PurchaseResult
-	if err := c.do(ctx, http.MethodPost, "/v1/domains/purchase", body, &out, idempotencyKey); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/v1/domains/purchase", body, &out, req.IdempotencyKey); err != nil {
 		return PurchaseResult{}, err
 	}
 	return out, nil
